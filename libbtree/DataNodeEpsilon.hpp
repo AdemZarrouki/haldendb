@@ -324,6 +324,11 @@ public:
 		if (it != m_keys.end() && *it == key) {
 			return ErrorCode::KeyAlreadyExists;
 		}
+		or overwrite value for existing key?
+		if (it != m_vtKeys.end() && *it == key) {
+			m_vtValues[it - m_vtKeys.begin()] = value;
+			return ErrorCode::Success;
+}
 		*/
 
 		// Insert the key and value at the correct position
@@ -437,7 +442,7 @@ public:
 			m_vtKeys.begin() + nMid, m_vtKeys.end(),
 			//TODO CHECK m_vtKeys.begin() + nMid + 1, m_vtKeys.end(),  should pivotKeyForParent be excluded as it is passed the parent node
 			m_vtValues.begin() + nMid, m_vtValues.end());
-		//TODO CHECK m_vtValues.begin() + nMid + 1, m_vtValues.end());  should pivotKeyForParent be excluded as it is passed the parent node
+			//TODO CHECK m_vtValues.begin() + nMid + 1, m_vtValues.end());  should pivotKeyForParent be excluded as it is passed the parent node
 
 		if (!uidSibling)
 		{
