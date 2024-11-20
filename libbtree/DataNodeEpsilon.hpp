@@ -647,9 +647,16 @@ public:
 		if (!ptrSibling) {
 			throw std::runtime_error("Invalid operation: Sibling node is null.");
 		}
-
-		m_vtKeys.insert(m_vtKeys.end(), ptrSibling->m_vtKeys.begin(), ptrSibling->m_vtKeys.end());
-		m_vtValues.insert(m_vtValues.end(), ptrSibling->m_vtValues.begin(), ptrSibling->m_vtValues.end());
+		try
+		{
+			m_vtKeys.insert(m_vtKeys.end(), ptrSibling->m_vtKeys.begin(), ptrSibling->m_vtKeys.end());
+			m_vtValues.insert(m_vtValues.end(), ptrSibling->m_vtValues.begin(), ptrSibling->m_vtValues.end());
+		}
+		catch (...)
+		{
+			throw std::runtime_error("Failed to merge sibling nodes.");
+		}
+		
 
 #ifdef __TRACK_CACHE_FOOTPRINT__
 		if constexpr (std::is_trivial<KeyType>::value &&
