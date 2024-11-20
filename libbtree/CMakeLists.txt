@@ -3,6 +3,7 @@ add_library(libbtree
             DataNode.hpp
 	    DataNodeROpt.hpp
             ErrorCodes.h
+            Operations.h
             IndexNode.hpp
 	    IndexNodeROpt.hpp
             TypeMarshaller.hpp

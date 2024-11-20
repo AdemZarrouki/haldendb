@@ -9,6 +9,7 @@
 #include <fstream>
 #include <assert.h>
 #include "ErrorCodes.h"
+#include "Operations.h"
 
 
 template <typename KeyType, typename ValueType, typename ObjectUIDType, uint8_t TYPE_UID>
@@ -19,12 +20,6 @@ public:
 	static const uint8_t UID = TYPE_UID;
 
 private:
-	struct Operation {
-		enum Type { INSERT, DELETE, UPDATE, SEARCH } type;
-		KeyType key;
-		std::optional<ValueType> value;  // Only used for insertions
-	};
-
 	typedef DataNodeEpsilon<KeyType, ValueType, ObjectUIDType, TYPE_UID> SelfType;
 
 	// Aliases for iterators over key and value vectors
