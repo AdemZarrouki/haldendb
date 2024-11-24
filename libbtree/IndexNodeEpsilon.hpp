@@ -807,7 +807,18 @@ public:
 	}
 
 	// Update
-	inline ErrorCode update(const KeyType& key, const ValueType& newValue) {
+#ifdef __TRACK_CACHE_FOOTPRINT__
+	inline ErrorCode update(const KeyType& key, const ValueType& newValue, int32_t& nMemoryFootprint)
+#else //__TRACK_CACHE_FOOTPRINT__
+	inline ErrorCode update(const KeyType& key, const ValueType& newValue)
+#endif //__TRACK_CACHE_FOOTPRINT__
+	{
+#ifdef __TRACK_CACHE_FOOTPRINT__
+		uint32_t nPivotContainerCapacity = m_vtPivots.capacity();
+		uint32_t nChildrenContainerCapacity = m_vtChildren.capacity();
+		uint32_t nBufferContainerCapacity = m_vtBuffer.capacity();
+#endif //__TRACK_CACHE_FOOTPRINT__
+
 		// Find the key in the buffer
 		auto it = std::lower_bound(m_vtBuffer.begin(), m_vtBuffer.end(), key, [](const auto& entry, const KeyType& key) {
 			return entry.first < key;
@@ -822,24 +833,80 @@ public:
 		else {
 			// Key not found; add as a new operation
 			m_vtBuffer.insert(it, { key, {Operations::Update, newValue} });
+#ifdef __TRACK_CACHE_FOOTPRINT__
+			if constexpr (std::is_trivial<KeyType>::value &&
+				std::is_standard_layout<KeyType>::value &&
+				std::is_trivial<typename ObjectUIDType::NodeUID>::value &&
+				std::is_standard_layout<typename ObjectUIDType::NodeUID>::value &&
+				std::is_trivial<ValueType>::value &&
+				std::is_standard_layout<ValueType>::value)
+			{
+				if (nPivotContainerCapacity != m_vtPivots.capacity())
+				{
+					nMemoryFootprint -= nPivotContainerCapacity * sizeof(KeyType);
+					nMemoryFootprint += m_vtPivots.capacity() * sizeof(KeyType);
+				}
+
+				if (nChildrenContainerCapacity != m_vtChildren.capacity())
+				{
+					nMemoryFootprint -= nChildrenContainerCapacity * sizeof(ObjectUIDType);
+					nMemoryFootprint += m_vtChildren.capacity() * sizeof(ObjectUIDType);
+				}
+
+				if (nBufferContainerCapacity != m_vtBuffer.capacity())
+				{
+					nMemoryFootprint -= nBufferContainerCapacity * sizeof(std::pair<KeyType, std::pair<Operations, std::optional<ValueType>> >);
+					nMemoryFootprint += m_vtBuffer.capacity() * sizeof(std::pair<KeyType, std::pair<Operations, std::optional<ValueType>> >);
+				}
+			}
+			else
+			{
+				static_assert(
+					std::is_trivial<KeyType>::value &&
+					std::is_standard_layout<KeyType>::value &&
+					std::is_trivial<typename ObjectUIDType::NodeUID>::value &&
+					std::is_standard_layout<typename ObjectUIDType::NodeUID>::value &&
+					std::is_trivial<ValueType>::value &&
+					std::is_standard_layout<ValueType>::value,
+					"Non-POD type is provided. Kindly provide functionality to calculate size.");
+			}
+#endif //__TRACK_CACHE_FOOTPRINT__
+
 			// Check buffer size
 			if (m_vtBuffer.size() >= m_nBufferSize) {
+#ifdef __TRACK_CACHE_FOOTPRINT__
+				return flushBuffer(nMemoryFootprint);
+#else //__TRACK_CACHE_FOOTPRINT__
 				return flushBuffer();
+#endif //__TRACK_CACHE_FOOTPRINT__
 			}
 			return ErrorCode::Success;
 		}
 	}
 
 	// Remove
-	inline ErrorCode remove(const KeyType& key) {
+#ifdef __TRACK_CACHE_FOOTPRINT__
+	inline ErrorCode remove(const KeyType& key, int32_t& nMemoryFootprint)
+#else //__TRACK_CACHE_FOOTPRINT__
+	inline ErrorCode remove(const KeyType& key) 
+#endif //__TRACK_CACHE_FOOTPRINT__
+	{
+#ifdef __TRACK_CACHE_FOOTPRINT__
+		uint32_t nPivotContainerCapacity = m_vtPivots.capacity();
+		uint32_t nChildrenContainerCapacity = m_vtChildren.capacity();
+		uint32_t nBufferContainerCapacity = m_vtBuffer.capacity();
+#endif //__TRACK_CACHE_FOOTPRINT__
+
 		// Find the key in the buffer
 		auto it = std::lower_bound(m_vtBuffer.begin(), m_vtBuffer.end(), key, [](const auto& entry, const KeyType& key) {
 			return entry.first < key;
 			});
 
-		if (it != m_vtBuffer.end() && it->first == key) {
+		if (it != m_vtBuffer.end() && it->first == key) 
+		{
 			// If the key exists in the buffer
-			switch (it->second.first) {
+			switch (it->second.first) 
+			{
 			case Operations::Insert:
 				// Remove the entry if it was an Insert
 				m_vtBuffer.erase(it);
@@ -853,20 +920,74 @@ public:
 				return ErrorCode::Success;
 			}
 		}
-		else {
+		else 
+		{
 			// If the key does not exist, add a Delete operation
 			m_vtBuffer.insert(it, { key, {Operations::Delete, std::nullopt} });
 		}
+#ifdef __TRACK_CACHE_FOOTPRINT__
+		if constexpr (std::is_trivial<KeyType>::value &&
+			std::is_standard_layout<KeyType>::value &&
+			std::is_trivial<typename ObjectUIDType::NodeUID>::value &&
+			std::is_standard_layout<typename ObjectUIDType::NodeUID>::value &&
+			std::is_trivial<ValueType>::value &&
+			std::is_standard_layout<ValueType>::value)
+		{
+			if (nPivotContainerCapacity != m_vtPivots.capacity())
+			{
+				nMemoryFootprint -= nPivotContainerCapacity * sizeof(KeyType);
+				nMemoryFootprint += m_vtPivots.capacity() * sizeof(KeyType);
+			}
 
-		// Check buffer size and flush if necessary
-		if (m_vtBuffer.size() >= m_nBufferSize) {
+			if (nChildrenContainerCapacity != m_vtChildren.capacity())
+			{
+				nMemoryFootprint -= nChildrenContainerCapacity * sizeof(ObjectUIDType);
+				nMemoryFootprint += m_vtChildren.capacity() * sizeof(ObjectUIDType);
+			}
+
+			if (nBufferContainerCapacity != m_vtBuffer.capacity())
+			{
+				nMemoryFootprint -= nBufferContainerCapacity * sizeof(std::pair<KeyType, std::pair<Operations, std::optional<ValueType>> >);
+				nMemoryFootprint += m_vtBuffer.capacity() * sizeof(std::pair<KeyType, std::pair<Operations, std::optional<ValueType>> >);
+			}
+		}
+		else
+		{
+			static_assert(
+				std::is_trivial<KeyType>::value &&
+				std::is_standard_layout<KeyType>::value &&
+				std::is_trivial<typename ObjectUIDType::NodeUID>::value &&
+				std::is_standard_layout<typename ObjectUIDType::NodeUID>::value &&
+				std::is_trivial<ValueType>::value &&
+				std::is_standard_layout<ValueType>::value,
+				"Non-POD type is provided. Kindly provide functionality to calculate size.");
+		}
+#endif //__TRACK_CACHE_FOOTPRINT__
+
+		if (m_vtBuffer.size() >= m_nBufferSize) 
+		{
+#ifdef __TRACK_CACHE_FOOTPRINT__
+			return flushBuffer(nMemoryFootprint);
+#else //__TRACK_CACHE_FOOTPRINT__
 			return flushBuffer();
+#endif //__TRACK_CACHE_FOOTPRINT__
 		}
 		return ErrorCode::Success;
 	}
 
 	// Search
-	inline ErrorCode search(const KeyType& key, std::optional<ValueType>& value) const {
+#ifdef __TRACK_CACHE_FOOTPRINT__
+	inline ErrorCode search(const KeyType& key, std::optional<ValueType>& value, int32_t& nMemoryFootprint) const
+#else //__TRACK_CACHE_FOOTPRINT__
+	inline ErrorCode search(const KeyType& key, std::optional<ValueType>& value) const 
+#endif //__TRACK_CACHE_FOOTPRINT__
+	{
+#ifdef __TRACK_CACHE_FOOTPRINT__
+		uint32_t nPivotContainerCapacity = m_vtPivots.capacity();
+		uint32_t nChildrenContainerCapacity = m_vtChildren.capacity();
+		uint32_t nBufferContainerCapacity = m_vtBuffer.capacity();
+#endif //__TRACK_CACHE_FOOTPRINT__
+
 		// Find the key in the buffer
 		auto it = std::lower_bound(m_vtBuffer.begin(), m_vtBuffer.end(), key, [](const auto& entry, const KeyType& key) {
 			return entry.first < key;
@@ -883,10 +1004,52 @@ public:
 				return ErrorCode::Success;
 			}
 		}
+#ifdef __TRACK_CACHE_FOOTPRINT__
+		if constexpr (std::is_trivial<KeyType>::value &&
+			std::is_standard_layout<KeyType>::value &&
+			std::is_trivial<typename ObjectUIDType::NodeUID>::value &&
+			std::is_standard_layout<typename ObjectUIDType::NodeUID>::value &&
+			std::is_trivial<ValueType>::value &&
+			std::is_standard_layout<ValueType>::value)
+		{
+			if (nPivotContainerCapacity != m_vtPivots.capacity())
+			{
+				nMemoryFootprint -= nPivotContainerCapacity * sizeof(KeyType);
+				nMemoryFootprint += m_vtPivots.capacity() * sizeof(KeyType);
+			}
+
+			if (nChildrenContainerCapacity != m_vtChildren.capacity())
+			{
+				nMemoryFootprint -= nChildrenContainerCapacity * sizeof(ObjectUIDType);
+				nMemoryFootprint += m_vtChildren.capacity() * sizeof(ObjectUIDType);
+			}
+
+			if (nBufferContainerCapacity != m_vtBuffer.capacity())
+			{
+				nMemoryFootprint -= nBufferContainerCapacity * sizeof(std::pair<KeyType, std::pair<Operations, std::optional<ValueType>> >);
+				nMemoryFootprint += m_vtBuffer.capacity() * sizeof(std::pair<KeyType, std::pair<Operations, std::optional<ValueType>> >);
+			}
+		}
+		else
+		{
+			static_assert(
+				std::is_trivial<KeyType>::value &&
+				std::is_standard_layout<KeyType>::value &&
+				std::is_trivial<typename ObjectUIDType::NodeUID>::value &&
+				std::is_standard_layout<typename ObjectUIDType::NodeUID>::value &&
+				std::is_trivial<ValueType>::value &&
+				std::is_standard_layout<ValueType>::value,
+				"Non-POD type is provided. Kindly provide functionality to calculate size.");
+		}
+#endif //__TRACK_CACHE_FOOTPRINT__
 		else {
 			// Key not found in the buffer
 			size_t childIndex = getChildNodeIdx(key);
+#ifdef __TRACK_CACHE_FOOTPRINT__
+			return m_vtChildren[childIndex].search(key, value, nMemoryFootprint);
+#else //__TRACK_CACHE_FOOTPRINT__
 			return m_vtChildren[childIndex].search(key, value);
+#endif //__TRACK_CACHE_FOOTPRINT__
 		}
 	}
 
@@ -917,9 +1080,8 @@ public:
 			break;
 
 		default:
-			return ErrorCode::Error;
+			throw std::runtime_error("Unexpected operation type in mergeOperations.");
 		}
-		return ErrorCode::Success;
 	}
 
 	// flush the buffer
