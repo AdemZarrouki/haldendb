@@ -303,6 +303,12 @@ public:
 	}
 
 public:
+	// get buffer
+	inline const std::vector < std::pair<KeyType, std::pair<Operations, std::optional<ValueType>>>& getBuffer() const
+	{
+		return m_vtBuffer;
+	}
+
 	// Writes the node's data and buffer to a file stream
 	inline void writeToStream(std::fstream& fs, uint8_t& uidObjectType, uint32_t& nDataSize) const
 	{
