@@ -309,6 +309,12 @@ public:
 		return m_vtBuffer;
 	}
 
+	// get buffer size
+	inline size_t getBufferSize() const
+	{
+		return m_vtBuffer.size();
+	}
+
 	// Writes the node's data and buffer to a file stream
 	inline void writeToStream(std::fstream& fs, uint8_t& uidObjectType, uint32_t& nDataSize) const
 	{
@@ -574,6 +580,11 @@ public:
 	inline bool requireMerge(size_t nDegree) const
 	{
 		return m_vtPivots.size() <= std::ceil(nDegree / 2.0f);
+	}
+
+	inline bool requireFlushBuffer() const
+	{
+		return m_vtBuffer.size() >= m_nBufferSize;
 	}
 
 	inline size_t getSize() const
