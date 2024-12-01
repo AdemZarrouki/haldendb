@@ -537,6 +537,24 @@ public:
 		return std::distance(m_vtPivots.begin(), it);
 	}
 
+	//  retrieve the correct pivot key during merging.
+	inline KeyType getPivotForMerge(const ObjectUIDType& siblingUID) const {
+		// Find the sibling's index
+		auto it = std::find(m_vtChildren.begin(), m_vtChildren.end(), siblingUID);
+		if (it == m_vtChildren.end()) {
+			throw std::runtime_error("Sibling UID not found in children.");
+		}
+
+		size_t siblingIndex = std::distance(m_vtChildren.begin(), it);
+
+		// The pivot key is just before the sibling in the pivots vector
+		if (siblingIndex == 0) {
+			throw std::runtime_error("Cannot get pivot for leftmost child.");
+		}
+
+		return m_vtPivots[siblingIndex - 1];
+	}
+
 	// Gets the child at the given index
 	inline const ObjectUIDType& getChildAt(size_t nIdx) const
 	{
