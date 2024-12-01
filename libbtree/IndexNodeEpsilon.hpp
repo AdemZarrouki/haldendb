@@ -315,6 +315,13 @@ public:
 		return m_vtBuffer.size();
 	}
 
+	// get all childs
+	inline const std::vector<ObjectUIDType>& getChildren() const
+	{
+		return m_vtChildren;
+	}
+
+
 	// Writes the node's data and buffer to a file stream
 	inline void writeToStream(std::fstream& fs, uint8_t& uidObjectType, uint32_t& nDataSize) const
 	{
@@ -537,7 +544,7 @@ public:
 		return std::distance(m_vtPivots.begin(), it);
 	}
 
-	//  retrieve the correct pivot key during merging.
+	// retrieve the correct pivot key during merging.
 	inline KeyType getPivotForMerge(const ObjectUIDType& siblingUID) const {
 		// Find the sibling's index
 		auto it = std::find(m_vtChildren.begin(), m_vtChildren.end(), siblingUID);
