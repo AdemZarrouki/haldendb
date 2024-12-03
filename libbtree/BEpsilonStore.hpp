@@ -211,7 +211,6 @@ public:
 				}
 
 				// Apply collected messages in reverse order
-				// Apply collected messages in reverse order
 				for (auto it = collectedMessages.rbegin(); it != collectedMessages.rend(); ++it) {
 					const auto& operation = *it;
 					switch (operation.first) {
@@ -438,4 +437,70 @@ public:
 		return false;
 	}
 
+	// range query search
+	inline ErrorCode rangeQuery(const KeyType& firstKey, const KeyType& secondKey, std::vector<std::pair<KeyType, ValueType>>& results)
+	{
+		if (!m_uidRootNode) 
+		{
+			return ErrorCode::TreeEmpty; // Handle the case where the tree is empty
+		}
+
+		ObjectUIDType uidCurrentNode = *m_uidRootNode;
+		ObjectTypePtr ptrCurrentNode = nullptr;
+
+		do {
+			// Retrieve the current node
+			m_ptrCache->getObject(uidCurrentNode, ptrCurrentNode);
+			if (!ptrCurrentNode) 
+			{
+				throw std::runtime_error("Cache returned a null object during range query.");
+			}
+
+			// Check if the current node is an internal node
+			if (std::holds_alternative<std::shared_ptr<IndexNodeEpsilonType>>(ptrCurrentNode->getInnerData()))
+			{
+				auto ptrIndexEpsilonNode = std::get<std::shared_ptr<IndexNodeEpsilonType>>(ptrCurrentNode->getInnerData());
+
+				// Collect messages for the range
+				const auto& buffer = ptrIndexEpsilonNode->getBuffer();
+				for (const auto& message : buffer) 
+				{
+					if (message.first >= firstKey && message.first <= secondKey) 
+					{
+						if (message.second.first == Operations::Insert || message.second.first == Operations::Update)
+						{
+							results.push_back({ message.first, message.second.second.value() });
+						}
+					}
+				}
+
+				// Determine the next child to descend into
+				uidCurrentNode = ptrIndexEpsilonNode->getChild(firstKey);
+			}
+			// Check if the current node is a leaf node
+			else if (std::holds_alternative<std::shared_ptr<DataNodeEpsilonType>>(ptrCurrentNode->getInnerData()))
+			{
+				auto ptrDataEpsilonNode = std::get<std::shared_ptr<DataNodeEpsilonType>>(ptrCurrentNode->getInnerData());
+
+				// Collect all key-value pairs in the range
+				auto keys = ptrDataEpsilonNode->getKeys();
+				auto values = ptrDataEpsilonNode->getValues();
+				for (size_t i = 0; i < keys.size(); ++i) 
+				{
+					if (keys[i] >= firstKey && keys[i] <= secondKey) 
+					{
+						results.push_back({ keys[i], values[i] });
+					}
+				}
+
+				break; // No more nodes to traverse
+			}
+			else 
+			{
+				throw std::runtime_error("Invalid node type encountered during range query.");
+			}
+		} while (true);
+
+		return ErrorCode::Success;
+	}
 };
