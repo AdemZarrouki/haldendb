@@ -184,6 +184,18 @@ public:
 		return m_vtKeys.size();
 	}
 
+	// Retrieves all keys in the node
+	inline const std::vector<KeyType>& getKeys() const
+	{
+		return m_vtKeys;
+	}
+
+	// Retrieves all values in the node
+	inline const std::vector<ValueType>& getValues() const
+	{
+		return m_vtValues;
+	}
+
 	// Retrieves the value for a given key
 	inline ErrorCode getValue(const KeyType& key, ValueType& value) const
 	{
