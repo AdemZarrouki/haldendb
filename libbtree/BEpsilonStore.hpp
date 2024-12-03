@@ -503,4 +503,30 @@ public:
 
 		return ErrorCode::Success;
 	}
+
+	// bulk insert
+	inline ErrorCode bulkInsert(const std::vector<std::pair<KeyType, ValueType>>& data)
+	{
+		if (!m_uidRootNode)
+		{
+			return ErrorCode::TreeEmpty; // Handle the case where the tree is empty
+		}
+
+		if (data.empty()) {
+			// todo: check if this is correct or we need to return an error
+			return ErrorCode::Success;
+		}
+
+		auto sortedData = data; // Make a copy to avoid modifying the input
+		std::sort(sortedData.begin(), sortedData.end(),
+			[](const auto& a, const auto& b) { return a.first < b.first; });
+
+		for (const auto& [key, value] : sortedData) {
+			ErrorCode result = insert(key, value);
+			if (result != ErrorCode::Success) {
+				return result; // Return immediately if an insertion fails
+			}
+		}
+		return ErrorCode::Success;
+	}
 };
