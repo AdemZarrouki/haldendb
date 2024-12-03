@@ -66,6 +66,10 @@ public:
 	// insert a key
 	inline ErrorCode insert(const KeyType& key, const ValueType& value) 
 	{
+		if (!m_uidRootNode) {
+			return ErrorCode::TreeEmpty; // Handle the case where the tree is empty
+		}
+
 		ObjectUIDType uidCurrentNode = *m_uidRootNode;
 		ObjectTypePtr ptrCurrentNode = nullptr;
 
@@ -160,6 +164,10 @@ public:
 
 	// Search for a key
 	inline ErrorCode search(const KeyType& key, ValueType& result) {
+		if (!m_uidRootNode) {
+			return ErrorCode::TreeEmpty; // Handle the case where the tree is empty
+		}
+
 		ObjectUIDType uidCurrentNode = *m_uidRootNode;  // Start at the root node
 		ObjectTypePtr ptrCurrentNode = nullptr;        // Current node pointer
 		std::vector<std::pair<Operations, std::optional<ValueType>>> collectedMessages;  // Collected operations for the key
@@ -235,6 +243,10 @@ public:
 
 	inline ErrorCode remove(const KeyType& key) 
 	{
+		if (!m_uidRootNode) {
+			return ErrorCode::TreeEmpty; // Handle the case where the tree is empty
+		}
+
 		ObjectUIDType uidCurrentNode = *m_uidRootNode;
 		ObjectTypePtr ptrCurrentNode = nullptr;
 
@@ -362,6 +374,10 @@ public:
 
 	// another insert method
 	inline ErrorCode insertRecursive(const KeyType& key, const ValueType& value) {
+		if (!m_uidRootNode) {
+			return ErrorCode::TreeEmpty; // Handle the case where the tree is empty
+		}
+
 		while (true) {
 			ObjectUIDType uidCurrentNode = *m_uidRootNode;
 			ObjectTypePtr ptrCurrentNode = nullptr;
