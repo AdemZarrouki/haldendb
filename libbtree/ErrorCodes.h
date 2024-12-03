@@ -6,4 +6,5 @@ enum class ErrorCode {
     InsertFailed,
     ChildSplitCalledOnLeafNode,
     KeyDoesNotExist,
+    TreeEmpty,
 };
