@@ -381,14 +381,13 @@ public:
 	inline ErrorCode bulkInsert(const std::vector<KeyType>& keys, const std::vector<ValueType>& values)
 #endif //__TRACK_CACHE_FOOTPRINT__
 	{
+		if (keys.size() != values.size()) {
+			return ErrorCode::Error;
+		}
 #ifdef __TRACK_CACHE_FOOTPRINT__
 		uint32_t nKeyContainerCapacity = m_vtKeys.capacity();
 		uint32_t nValueContainerCapacity = m_vtValues.capacity();
 #endif //__TRACK_CACHE_FOOTPRINT__
-
-		if (keys.size() != values.size()) {
-			return ErrorCode::Error;
-		}
 
 		for (size_t i = 0; i < keys.size(); ++i) {
 			// Find the insertion position using binary search
@@ -430,6 +429,59 @@ public:
 
 		return ErrorCode::Success;
 	}
+
+	// Updates the value for a given key
+#ifdef __TRACK_CACHE_FOOTPRINT__
+		inline ErrorCode update(const KeyType& key, const ValueType& newValue, int32_t& nMemoryFootprint)
+#else //__TRACK_CACHE_FOOTPRINT__
+	inline ErrorCode update(const KeyType& key, const ValueType& newValue)
+#endif //__TRACK_CACHE_FOOTPRINT__
+	{
+#ifdef __TRACK_CACHE_FOOTPRINT__
+		uint32_t nKeyContainerCapacity = m_vtKeys.capacity();
+		uint32_t nValueContainerCapacity = m_vtValues.capacity();
+#endif //__TRACK_CACHE_FOOTPRINT__
+
+		auto it = std::lower_bound(m_vtKeys.begin(), m_vtKeys.end(), key);
+		if (it != m_vtKeys.end() && *it == key)
+		{
+			size_t index = std::distance(m_vtKeys.begin(), it);
+			m_vtValues[index] = newValue;
+#ifdef __TRACK_CACHE_FOOTPRINT__
+			if constexpr (std::is_trivial<KeyType>::value &&
+				std::is_standard_layout<KeyType>::value &&
+				std::is_trivial<ValueType>::value &&
+				std::is_standard_layout<ValueType>::value)
+			{
+				if (nKeyContainerCapacity != m_vtKeys.capacity())
+				{
+					nMemoryFootprint -= nKeyContainerCapacity * sizeof(KeyType);
+					nMemoryFootprint += m_vtKeys.capacity() * sizeof(KeyType);
+				}
+
+				if (nValueContainerCapacity != m_vtValues.capacity())
+				{
+					nMemoryFootprint -= nValueContainerCapacity * sizeof(ValueType);
+					nMemoryFootprint += m_vtValues.capacity() * sizeof(ValueType);
+				}
+			}
+			else
+			{
+				static_assert(
+					std::is_trivial<KeyType>::value &&
+					std::is_standard_layout<KeyType>::value &&
+					std::is_trivial<ValueType>::value &&
+					std::is_standard_layout<ValueType>::value,
+					"Non-POD type is provided. Kindly provide functionality to calculate size.");
+			}
+#endif //__TRACK_CACHE_FOOTPRINT__
+
+			return ErrorCode::Success; // Key found and updated
+		}
+		return ErrorCode::KeyNotFound; // Key does not exist
+	}
+
+
 
 	// Splits the node into two nodes and returns the pivot key for the parent node
 	template <typename CacheType, typename CacheObjectTypePtr>
