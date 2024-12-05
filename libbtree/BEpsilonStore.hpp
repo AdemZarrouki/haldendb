@@ -25,12 +25,17 @@
 
 using namespace std::chrono_literals;
 
+#ifdef __TREE_WITH_CACHE__
+template <typename ICallback, typename KeyType, typename ValueType, typename CacheType>
+class BEpsilonStore : public ICallback
+#else //__TREE_WITH_CACHE__
 template <typename KeyType, typename ValueType, typename CacheType>
-
-class BEpsilonStore {
-    using ObjectUIDType = typename CacheType::ObjectUIDType;
-    using ObjectType = typename CacheType::ObjectType;
-    using ObjectTypePtr = typename CacheType::ObjectTypePtr;
+class BEpsilonStore
+#endif //__TREE_WITH_CACHE__
+{
+	typedef CacheType::ObjectUIDType ObjectUIDType;
+	typedef CacheType::ObjectType ObjectType;
+	typedef CacheType::ObjectTypePtr ObjectTypePtr;
 
     using DataNodeEpsilonType = typename std::tuple_element<0, typename ObjectType::ValueCoreTypesTuple>::type;
     using IndexNodeEpsilonType = typename std::tuple_element<1, typename ObjectType::ValueCoreTypesTuple>::type;
@@ -40,6 +45,10 @@ private:
     uint32_t m_nBufferSize; // Maximum buffer size in internal nodes
     std::shared_ptr<CacheType> m_ptrCache;
     std::optional<ObjectUIDType> m_uidRootNode;
+
+#ifdef __CONCURRENT__
+	mutable std::shared_mutex m_mutex;
+#endif //__CONCURRENT__
 
 public:
 	// Destructor
@@ -59,7 +68,11 @@ public:
 	
 	// Initialize the tree with an empty root node
 	template <typename DefaultNodeType>
-	void init() {
+	void init() 
+	{
+#ifdef __TREE_WITH_CACHE__
+		m_ptrCache->init(this);
+#endif //__TREE_WITH_CACHE__
 		m_ptrCache->template createObjectOfType<DefaultNodeType>(m_uidRootNode);
 	}
 
