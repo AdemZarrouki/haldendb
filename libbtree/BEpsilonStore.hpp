@@ -544,4 +544,57 @@ public:
 		}
 		return ErrorCode::Success;
 	}
+
+	// update tje value of a key
+	inline ErrorCode update(const KeyType& key, const ValueType& newValue)
+	{
+		if (!m_uidRootNode) {
+			return ErrorCode::TreeEmpty; // Handle the case where the tree is empty
+		}
+
+		ObjectUIDType uidCurrentNode = *m_uidRootNode;
+		ObjectTypePtr ptrCurrentNode = nullptr;
+
+		do 
+		{
+			// Retrieve the current node
+			m_ptrCache->getObject(uidCurrentNode, ptrCurrentNode);
+			if (!ptrCurrentNode) 
+			{
+				throw std::runtime_error("Cache returned a null object during update.");
+			}
+
+			// Check if the current node is an internal node
+			if (std::holds_alternative<std::shared_ptr<IndexNodeEpsilonType>>(ptrCurrentNode->getInnerData())) 
+			{
+				auto ptrIndexEpsilonNode = std::get<std::shared_ptr<IndexNodeEpsilonType>>(ptrCurrentNode->getInnerData());
+
+				// Buffer the update operation
+				ptrIndexEpsilonNode->insert(key, { Operations::Update, newValue });
+
+				// Check if the buffer needs flushing
+				if (ptrIndexEpsilonNode->requireFlushBuffer()) 
+				{
+					ptrIndexEpsilonNode->flushBuffer();
+				}
+
+				// Traverse to the child node
+				uidCurrentNode = ptrIndexEpsilonNode->getChild(key);
+			}
+			// Check if the current node is a leaf node
+			else if (std::holds_alternative<std::shared_ptr<DataNodeEpsilonType>>(ptrCurrentNode->getInnerData())) 
+			{
+				auto ptrDataEpsilonNode = std::get<std::shared_ptr<DataNodeEpsilonType>>(ptrCurrentNode->getInnerData());
+
+				// Update the key directly in the leaf node
+				ErrorCode result = ptrDataEpsilonNode->update(key, newValue);
+
+				return result; // Return the result of the update
+			}
+			else 
+			{
+				throw std::runtime_error("Invalid node type encountered during update.");
+			}
+		} while (true);
+	}
 };
