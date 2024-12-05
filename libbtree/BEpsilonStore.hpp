@@ -54,6 +54,8 @@ public:
 	// Destructor
 	~BEpsilonStore()
 	{
+		m_ptrCache.reset();
+		m_uidRootNode.reset();
 	}
 
 	// Constructor
