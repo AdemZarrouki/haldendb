@@ -1007,7 +1007,7 @@ return;
 
 }
 
-int main(int argc, char* argv[])
+/*int main(int argc, char* argv[])
 {
     //fptree_bm();
     quick_test();
@@ -1118,3 +1118,4 @@ int main(int argc, char* argv[])
     std::cout << "End.";
     return 0;
 }
+*/
