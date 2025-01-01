@@ -17,53 +17,61 @@
 using namespace std;
 
 template <typename KeyType, typename ValueType>
-class BEpsilonTree {
+class BEpsilonTree 
+{
 public:
     Node<KeyType, ValueType>* root;
     uint32_t m_nDegree;
     uint32_t bufferSize;
 
-    BEpsilonTree(int m_nDegree, int bufferSize) {
+    BEpsilonTree(int m_nDegree, int bufferSize) 
+    {
         root = new Node<KeyType, ValueType>(true);
         this->m_nDegree = m_nDegree;
         this->bufferSize = bufferSize;
     }
 
-    ~BEpsilonTree() {
+    ~BEpsilonTree() 
+    {
         deleteTree(root);
     }
 
 private:
     template <typename KeyType, typename ValueType>
-    void deleteTree(Node<KeyType, ValueType>* node) {
+    void deleteTree(Node<KeyType, ValueType>* node) 
+    {
         if (!node) return;
 
         // Recursively delete all children
-        for (Node<KeyType, ValueType>* child : node->children) {
+        for (Node<KeyType, ValueType>* child : node->children) 
+        {
             deleteTree(child);
         }
 
-        // Delete the current node
         delete node;
     }
 
 public:
 
+	// Remove a key from the tree
     template <typename KeyType>
     ErrorCode remove(KeyType key) {
-        if (!root) {
+        if (!root) 
+        {
             return ErrorCode::KeyDoesNotExist; // Tree is empty
         }
 
         Node<KeyType, ValueType>* current = root;
 
-        if (!current->isLeaf) {
+        if (!current->isLeaf) 
+        {
             // Add a Delete operation to the buffer
             ErrorCode result = insertBuffered(current, Operations::Delete, key, ValueType{});
             if (result != ErrorCode::Success) return result;
 
             // Flush the buffer if it exceeds the buffer size
-            if (current->buffer.size() >= bufferSize) {
+            if (current->buffer.size() >= bufferSize) 
+            {
                 result = flushBuffer(current);
                 if (result != ErrorCode::Success) return result;
             }
@@ -72,17 +80,20 @@ public:
 
         // If we are in a leaf node, remove the key directly
         auto it = std::find(current->keys.begin(), current->keys.end(), key);
-        if (it != current->keys.end()) {
+        if (it != current->keys.end()) 
+        {
             size_t index = std::distance(current->keys.begin(), it);
             current->keys.erase(it);
             current->values.erase(current->values.begin() + index);
         }
-        else {
+        else 
+        {
             return ErrorCode::KeyDoesNotExist; // Key not found
         }
 
         // Handle underflow if necessary
-        if (current->keys.size() < (m_nDegree / 2)) {
+        if (current->keys.size() < (m_nDegree / 2)) 
+        {
             Node<KeyType, ValueType>* parent = findParent(root, current);
             ErrorCode result = handleUnderflow(parent, current);
             if (result != ErrorCode::Success) return result;
@@ -91,9 +102,10 @@ public:
         return ErrorCode::Success;
     }
 
-    // Function to handle underflow in a node
+    // Handle underflow in a node
     template <typename KeyType, typename ValueType>
-    ErrorCode handleUnderflow(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* node) {
+    ErrorCode handleUnderflow(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* node) 
+    {
         if (!parent) return ErrorCode::Success; // Root doesn't underflow
 
         // Find the sibling of the underflowed node
@@ -102,7 +114,8 @@ public:
         Node<KeyType, ValueType>* rightSibling = (index + 1 < parent->children.size()) ? parent->children[index + 1] : nullptr;
 
         // Try to borrow from left sibling
-        if (leftSibling && leftSibling->keys.size() > (m_nDegree / 2)) {
+        if (leftSibling && leftSibling->keys.size() > (m_nDegree / 2)) 
+        {
             // Borrow the largest key from the left sibling
             KeyType borrowedKey = leftSibling->keys.back();
             ValueType borrowedValue = leftSibling->values.back();
@@ -120,7 +133,8 @@ public:
         }
 
         // Try to borrow from right sibling
-        if (rightSibling && rightSibling->keys.size() > (m_nDegree / 2)) {
+        if (rightSibling && rightSibling->keys.size() > (m_nDegree / 2)) 
+        {
             // Borrow the smallest key from the right sibling
             KeyType borrowedKey = rightSibling->keys.front();
             ValueType borrowedValue = rightSibling->values.front();
@@ -138,25 +152,29 @@ public:
         }
 
         // If borrowing is not possible, merge with a sibling
-        if (leftSibling) {
+        if (leftSibling) 
+        {
             mergeNodes(parent, leftSibling, node, index - 1);
         }
-        else if (rightSibling) {
+        else if (rightSibling) 
+        {
             mergeNodes(parent, node, rightSibling, index);
         }
 
         return ErrorCode::Success;
     }
 
-    // Function to merge two nodes
+    // Merge two nodes
     template <typename KeyType, typename ValueType>
-    void mergeNodes(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* left, Node<KeyType, ValueType>* right, size_t separatorIndex) {
+    void mergeNodes(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* left, Node<KeyType, ValueType>* right, size_t separatorIndex) 
+    {
         // Move the separator key from the parent to the left node
         left->keys.push_back(parent->keys[separatorIndex]);
         //left->keys.insert(left->keys.end(), right->keys.begin(), right->keys.end());
         //left->values.insert(left->values.end(), right->values.begin(), right->values.end());
 
-        if (!right->keys.size() == 1) {
+        if (!right->keys.size() == 1) 
+        {
             // Append all keys and values from the right sibling into the left sibling
             left->keys.insert(left->keys.end(), right->keys.begin(), right->keys.end());
 
@@ -166,21 +184,25 @@ public:
         parent->keys.erase(parent->keys.begin() + separatorIndex);
         parent->children.erase(parent->children.begin() + separatorIndex + 1);
 
-        delete right; // Free the memory of the right node
+        delete right;
     }
 
 
+    // Update the value of a specific key in the tree
     template <typename KeyType, typename ValueType>
-    ErrorCode update(KeyType key, ValueType newValue) {
+    ErrorCode update(KeyType key, ValueType newValue) 
+    {
         Node<KeyType, ValueType>* current = root;
 
-        if (!current->isLeaf) {
+        if (!current->isLeaf) 
+        {
             // Add an Update operation to the buffer
             ErrorCode result = insertBuffered(current, Operations::Update, key, newValue);
             if (result != ErrorCode::Success) return result;
 
             // Flush the buffer if it exceeds the buffer size
-            if (current->buffer.size() >= bufferSize) {
+            if (current->buffer.size() >= bufferSize) 
+            {
                 result = flushBuffer(current);
                 if (result != ErrorCode::Success) return result;
             }
@@ -189,11 +211,13 @@ public:
 
         // Update directly in the leaf if found
         auto it = std::find(current->keys.begin(), current->keys.end(), key);
-        if (it != current->keys.end()) {
+        if (it != current->keys.end()) 
+        {
             int index = std::distance(current->keys.begin(), it);
             current->values[index] = newValue; // Update the value
         }
-        else {
+        else 
+        {
             return ErrorCode::KeyDoesNotExist; // Key not found
         }
 
@@ -201,26 +225,33 @@ public:
     }
 
 
+	// Search for a key in the tree
     template <typename KeyType, typename ValueType>
-    ErrorCode search(KeyType key, ValueType& value) {
-        if (!root) {
+    ErrorCode search(KeyType key, ValueType& value) 
+    {
+        if (!root) 
+        {
             return ErrorCode::KeyDoesNotExist; // Tree is empty
         }
         Node<KeyType, ValueType>* current = root;
         vector<tuple<Operations, KeyType, ValueType>> collectedMessages;
 
         // Traverse the tree
-        while (!current->isLeaf) {
+        while (!current->isLeaf) 
+        {
             // Collect relevant messages for the key
-            for (const auto& message : current->buffer) {
-                if (std::get<1>(message) == key) {
+            for (const auto& message : current->buffer) 
+            {
+                if (std::get<1>(message) == key) 
+                {
                     collectedMessages.emplace_back(message);
                 }
             }
 
             // Determine which child to descend into
             size_t i = std::upper_bound(current->keys.begin(), current->keys.end(), key) - current->keys.begin();
-            if (i >= current->children.size()) {
+            if (i >= current->children.size()) 
+            {
                 return ErrorCode::KeyDoesNotExist; // Key not found
             }
 
@@ -230,46 +261,55 @@ public:
         // Now we are in a leaf node
         auto it = std::find(current->keys.begin(), current->keys.end(), key);
 
-        if (it != current->keys.end()) {
+        if (it != current->keys.end()) 
+        {
             // Key found: Start with the value in the leaf node
             size_t index = std::distance(current->keys.begin(), it);
             value = current->values[index];
         }
-        else {
+        else 
+        {
             // Key not found in the leaf; check for an Insert message
             bool keyInserted = false;
 
             if (!collectedMessages.empty())
             {
-                for (auto messageIt = collectedMessages.rbegin(); messageIt != collectedMessages.rend(); ++messageIt) {
+                for (auto messageIt = collectedMessages.rbegin(); messageIt != collectedMessages.rend(); ++messageIt) 
+                {
                     Operations opType = std::get<0>(*messageIt);
                     ValueType messageValue = std::get<2>(*messageIt);
 
-                    if (opType == Operations::Insert) {
+                    if (opType == Operations::Insert) 
+                    {
                         value = messageValue; // Use the value from the Insert message
                         keyInserted = true;
                         break;
                     }
-                    if (opType == Operations::Delete) {
+                    if (opType == Operations::Delete) 
+                    {
                         return ErrorCode::KeyDoesNotExist; // Key was deleted
                     }
                 }
             }
 
-            if (!keyInserted) {
+            if (!keyInserted) 
+            {
                 return ErrorCode::KeyDoesNotExist; // Key does not exist
             }
         }
 
         // Apply any remaining messages in reverse order
-        for (auto messageIt = collectedMessages.rbegin(); messageIt != collectedMessages.rend(); ++messageIt) {
+        for (auto messageIt = collectedMessages.rbegin(); messageIt != collectedMessages.rend(); ++messageIt) 
+        {
             Operations opType = std::get<0>(*messageIt);
             ValueType messageValue = std::get<2>(*messageIt);
 
-            if (opType == Operations::Delete) {
+            if (opType == Operations::Delete) 
+            {
                 return ErrorCode::KeyDoesNotExist; // Key was deleted
             }
-            if (opType == Operations::Update) {
+            if (opType == Operations::Update) 
+            {
                 value = messageValue; // Apply the update
             }
         }
@@ -277,24 +317,32 @@ public:
         return ErrorCode::Success;
     }
 
+
+	// Range query for keys in the range [low, high]
     template <typename KeyType>
-    std::vector<std::pair<KeyType, ValueType>> rangeQuery(KeyType low, KeyType high) {
+    std::vector<std::pair<KeyType, ValueType>> rangeQuery(KeyType low, KeyType high) 
+    {
         std::vector<std::pair<KeyType, ValueType>> result;
         Node<KeyType, ValueType>* current = root;
 
-        // Step 1: Traverse to the first relevant leaf node
-        while (!current->isLeaf) {
+        // Traverse to the first relevant leaf node
+        while (!current->isLeaf) 
+        {
             // Process the buffer of the current node
-            for (const auto& message : current->buffer) {
+            for (const auto& message : current->buffer) 
+            {
                 KeyType bufferedKey = std::get<1>(message);
-                if (bufferedKey >= low && bufferedKey <= high) {
+                if (bufferedKey >= low && bufferedKey <= high) 
+                {
                     Operations opType = std::get<0>(message);
                     ValueType bufferedValue = std::get<2>(message);
 
-                    if (opType == Operations::Insert) {
+                    if (opType == Operations::Insert) 
+                    {
                         result.emplace_back(bufferedKey, bufferedValue);
                     }
-                    else if (opType == Operations::Delete) {
+                    else if (opType == Operations::Delete) 
+                    {
                         auto it = std::remove_if(result.begin(), result.end(),
                             [bufferedKey](const std::pair<KeyType, ValueType>& pair) {
                                 return pair.first == bufferedKey;
@@ -305,53 +353,62 @@ public:
             }
 
             size_t i = std::upper_bound(current->keys.begin(), current->keys.end(), low) - current->keys.begin();
-            if (i >= current->children.size()) {
+            if (i >= current->children.size()) 
+            {
                 break;
             }
 
             current = current->children[i];
         }
 
-        // Step 2: Collect keys from relevant leaf nodes
-        while (true) {
+        // Collect keys from relevant leaf nodes
+        while (true) 
+        {
             // Collect keys in the range
-            for (size_t i = 0; i < current->keys.size(); ++i) {
-                if (current->keys[i] >= low && current->keys[i] <= high) {
+            for (size_t i = 0; i < current->keys.size(); ++i) 
+            {
+                if (current->keys[i] >= low && current->keys[i] <= high) 
+                {
                     result.emplace_back(current->keys[i], current->values[i]);
                 }
-                else if (current->keys[i] > high) {
+                else if (current->keys[i] > high)
+                {
                     return result;
                 }
             }
 
             // Find the next leaf node using parent-child relationship
             Node<KeyType, ValueType>* parent = findParent(root, current);
-            while (parent) {
+            while (parent) 
+            {
                 size_t index = std::find(parent->children.begin(), parent->children.end(), current) - parent->children.begin();
 
                 // Check if there's a sibling to the right
-                if (index + 1 < parent->children.size()) {
+                if (index + 1 < parent->children.size()) 
+                {
                     current = parent->children[index + 1];
 
                     // Descend to the leftmost child of the sibling
-                    while (!current->isLeaf) {
+                    while (!current->isLeaf) 
+                    {
                         current = current->children[0];
                     }
                     break;
                 }
-                else {
+                else 
+                {
                     // Move up to the parent's parent
                     current = parent;
                     parent = findParent(root, parent);
                 }
             }
 
-            if (!parent) {
+            if (!parent) 
+            {
                 break;
             }
         }
-
-        // Step 3: Sort and remove duplicates
+        // Sort and remove duplicates
         std::sort(result.begin(), result.end());
         result.erase(std::unique(result.begin(), result.end(),
             [](const std::pair<KeyType, ValueType>& a, const std::pair<KeyType, ValueType>& b) {
@@ -363,13 +420,13 @@ public:
     }
 
 
-
-
-
+	// Insert a key-value pair into the tree
     template <typename KeyType, typename ValueType>
-    ErrorCode insert(KeyType key, ValueType value) {
+    ErrorCode insert(KeyType key, ValueType value) 
+    {
         // Case: Tree is empty
-        if (!root) {
+        if (!root) 
+        {
             root = new Node<KeyType, ValueType>(true); // Create a new root as a leaf
             root->keys.push_back(key); // Insert the key directly
             root->values.push_back(value); // Insert the value directly
@@ -379,17 +436,21 @@ public:
         Node<KeyType, ValueType>* current = root;
 
         // Traverse the tree to find the appropriate node
-        if (!current->isLeaf) {
+        if (!current->isLeaf) 
+        {
             // Case: Add to the buffer of the root or current node
             ErrorCode result = insertBuffered(current, Operations::Insert, key, value);
-            if (result != ErrorCode::Success) {
+            if (result != ErrorCode::Success) 
+            {
                 return result;
             }
 
             // Flush the buffer if necessary
-            if (current->buffer.size() >= bufferSize) {
+            if (current->buffer.size() >= bufferSize) 
+            {
                 ErrorCode result = flushBuffer(current);
-                if (result != ErrorCode::Success) {
+                if (result != ErrorCode::Success) 
+                {
                     return result;
                 }
             }
@@ -410,10 +471,12 @@ public:
             sort(current->values.begin(), current->values.end());
 
             // If the leaf is overfull, split it
-            if (current->keys.size() >= m_nDegree) {
+            if (current->keys.size() >= m_nDegree) 
+            {
                 Node<KeyType, ValueType>* parent = findParent(root, current);
                 ErrorCode result = splitLeaf(parent, current);
-                if (result != ErrorCode::Success) {
+                if (result != ErrorCode::Success) 
+                {
                     return result;
                 }
             }
@@ -422,34 +485,41 @@ public:
     }
 
 
+    // Insert an operation to the buffer of an Internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode insertBuffered(Node<KeyType, ValueType>* node, Operations operation, KeyType key, ValueType value) {
+    ErrorCode insertBuffered(Node<KeyType, ValueType>* node, Operations operation, KeyType key, ValueType value) 
+    {
         auto it = std::find_if(node->buffer.begin(), node->buffer.end(),
             [key](const tuple<Operations, KeyType, ValueType>& op) {
                 return std::get<1>(op) == key;
             });
 
-        if (it != node->buffer.end()) {
+        if (it != node->buffer.end()) 
+        {
             Operations opType = std::get<0>(*it);
 
             switch (operation)
             {
             case Operations::Insert:
-                if (opType == Operations::Insert) {
+                if (opType == Operations::Insert) 
+                {
                     // Replace the last insert with the new one
                     *it = { Operations::Insert, key, value };
                 }
-                else if (opType == Operations::Delete) {
+                else if (opType == Operations::Delete) 
+                {
                     // Ignore the new insert
                     return ErrorCode::Success;
                 }
-                else if (opType == Operations::Update) {
+                else if (opType == Operations::Update) 
+                {
                     // Replace Update with Insert
                     *it = { Operations::Insert, key, value };
                 }
                 break;
             case Operations::Delete:
-                if (opType == Operations::Insert || opType == Operations::Update) {
+                if (opType == Operations::Insert || opType == Operations::Update) 
+                {
                     // Remove the Insert operation and add Delete
                     *it = { Operations::Delete, key, ValueType{} };
                 }
@@ -459,10 +529,12 @@ public:
                 }
                 break;
             case Operations::Update:
-                if (opType == Operations::Insert || opType == Operations::Update) {
+                if (opType == Operations::Insert || opType == Operations::Update) 
+                {
                     *it = { Operations::Update, key, value }; // Replace Insert/Update with Update
                 }
-                else if (opType == Operations::Delete) {
+                else if (opType == Operations::Delete) 
+                {
                     return ErrorCode::Error; // Can't Update after Delete
                 }
                 break;
@@ -480,14 +552,16 @@ public:
     }
 
 
+	// Flush the buffer of an Internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode flushBuffer(Node<KeyType, ValueType>* node) {
+    ErrorCode flushBuffer(Node<KeyType, ValueType>* node) 
+    {
         if (node->isLeaf || node->buffer.empty()) return ErrorCode::Success;
         auto bufferCopy = node->buffer;
         node->buffer.clear();
 
-        //for (auto& operation : node->buffer) {
-        for (auto& operation : bufferCopy) {
+        for (auto& operation : bufferCopy) 
+        {
             Operations opType = std::get<0>(operation); // Operation type
             KeyType key = std::get<1>(operation);          // Key
             ValueType value = std::get<2>(operation);        // Value
@@ -501,11 +575,13 @@ public:
             switch (opType)
             {
             case Operations::Insert:
-                if (!child->isLeaf) {
+                if (!child->isLeaf) 
+                {
                     // Propagate insert to the child buffer
                     propagateToBuffer(child, Operations::Insert, key, value);
                 }
-                else {
+                else 
+                {
                     // Insert directly into the leaf
                     auto it_keys = lower_bound(child->keys.begin(), child->keys.end(), key);
                     auto it_values = lower_bound(child->values.begin(), child->values.end(), value);
@@ -516,7 +592,8 @@ public:
 
 
                     // Split leaf if necessary
-                    if (child->keys.size() >= m_nDegree) {
+                    if (child->keys.size() >= m_nDegree) 
+                    {
                         ErrorCode result = splitLeaf(node, child);
                         if (result != ErrorCode::Success) return result;
                         node = findParent(root, child);
@@ -536,21 +613,24 @@ public:
                 }
                 break;
             case Operations::Delete:
-                //TODO: Implement delete
-                if (!child->isLeaf) {
+                if (!child->isLeaf) 
+                {
                     // Propagate delete to the child buffer
                     propagateToBuffer(child, Operations::Delete, key, ValueType{});
                 }
-                else {
+                else 
+                {
                     // Remove directly from the leaf
                     auto it = std::find(child->keys.begin(), child->keys.end(), key);
-                    if (it != child->keys.end()) {
+                    if (it != child->keys.end()) 
+                    {
                         size_t index = std::distance(child->keys.begin(), it);
                         child->keys.erase(it);
                         child->values.erase(child->values.begin() + index);
 
                         // Handle underflow if necessary
-                        if (child->keys.size() < (m_nDegree / 2)) {
+                        if (child->keys.size() < (m_nDegree / 2)) 
+                        {
                             ErrorCode result = handleUnderflow(node, child);
                             if (result != ErrorCode::Success) return result;
                         }
@@ -576,12 +656,15 @@ public:
                 break;
 
             case Operations::Update:
-                if (!child->isLeaf) {
+                if (!child->isLeaf) 
+                {
                     propagateToBuffer(child, Operations::Update, key, value);
                 }
-                else {
+                else 
+                {
                     auto it = std::find(child->keys.begin(), child->keys.end(), key);
-                    if (it != child->keys.end()) {
+                    if (it != child->keys.end()) 
+                    {
                         size_t index = std::distance(child->keys.begin(), it);
                         child->values[index] = value; // Update value
                     }
@@ -592,23 +675,27 @@ public:
             }
         }
 
-        node->buffer.clear();
+        //node->buffer.clear();
         return ErrorCode::Success;
     }
 
 
+	// propagate an operation to the buffer of a child node
     template <typename KeyType, typename ValueType>
     ErrorCode propagateToBuffer(Node<KeyType, ValueType>* child, Operations opType, KeyType key, ValueType value) {
         child->buffer.emplace_back(opType, key, value);
-        if (child->buffer.size() >= bufferSize) {
+        if (child->buffer.size() >= bufferSize) 
+        {
             return flushBuffer(child); // Flush child buffer if full
         }
         return ErrorCode::Success;
     }
 
 
+	// split a leaf node
     template <typename KeyType, typename ValueType>
-    ErrorCode splitLeaf(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* leaf) {
+    ErrorCode splitLeaf(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* leaf) 
+    {
         Node<KeyType, ValueType>* sibling = new Node<KeyType, ValueType>(true); // Create a new sibling (leaf)
 
         // Determine the split point
@@ -623,7 +710,8 @@ public:
         // The smallest key in the sibling becomes the pivot key
         KeyType pivotKey = sibling->keys[0];
 
-        if (!parent) {
+        if (!parent) 
+        {
             // Case: Leaf node is the root, so create a new root
             Node<KeyType, ValueType>* newRoot = new Node<KeyType, ValueType>(false); // New internal root
             newRoot->keys.push_back(pivotKey); // Promote pivot key to the root
@@ -631,7 +719,8 @@ public:
             newRoot->children.push_back(sibling); // Add sibling as the right child
             root = newRoot; // Update the root pointer
         }
-        else {
+        else 
+        {
             // Insert pivotKey into parent and add sibling
             auto it = std::lower_bound(parent->keys.begin(), parent->keys.end(), pivotKey);
             parent->keys.insert(it, pivotKey);
@@ -640,7 +729,8 @@ public:
             parent->children.insert(childIt + 1, sibling);
 
             // Check if the parent needs to split
-            if (parent->keys.size() >= m_nDegree) {
+            if (parent->keys.size() >= m_nDegree) 
+            {
                 Node<KeyType, ValueType>* grandparent = findParent(root, parent);
                 return splitInternal(grandparent, parent);
             }
@@ -650,9 +740,10 @@ public:
     }
 
 
-
+	// split an internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode splitInternal(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* internal) {
+    ErrorCode splitInternal(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* internal) 
+    {
         Node<KeyType, ValueType>* sibling = new Node<KeyType, ValueType>(false); // Create a new sibling (internal node)
 
         // Determine the split point
@@ -674,24 +765,28 @@ public:
         internal->children.resize(mid + 1); // Keep children up to the split point
 
 
-        if (!parent) {
+        if (!parent) 
+        {
             // Handle root split
             return handleRootSplit(internal, sibling, pivotKey);
         }
-        else {
+        else 
+        {
             // Promote the pivot key to the parent
             auto it = std::lower_bound(parent->keys.begin(), parent->keys.end(), pivotKey);
             parent->keys.insert(it, pivotKey);
 
             // Add the sibling to the parent's children
             auto childIt = std::find(parent->children.begin(), parent->children.end(), internal);
-            if (childIt == parent->children.end()) {
+            if (childIt == parent->children.end()) 
+            {
                 return ErrorCode::Error; // Parent-child relationship broken
             }
             parent->children.insert(childIt + 1, sibling);
 
             // Check if the parent needs to split
-            if (parent->keys.size() >= m_nDegree) { // Use ">" for strict overflow
+            if (parent->keys.size() >= m_nDegree) 
+            {
                 Node<KeyType, ValueType>* grandparent = findParent(root, parent);
                 return splitInternal(grandparent, parent);
             }
@@ -700,9 +795,11 @@ public:
         return ErrorCode::Success;
     }
 
-
+    
+	// Handle root split
     template <typename KeyType, typename ValueType>
-    ErrorCode handleRootSplit(Node<KeyType, ValueType>* oldRoot, Node<KeyType, ValueType>* sibling, KeyType pivotKey) {
+    ErrorCode handleRootSplit(Node<KeyType, ValueType>* oldRoot, Node<KeyType, ValueType>* sibling, KeyType pivotKey) 
+    {
         Node<KeyType, ValueType>* newRoot = new Node<KeyType, ValueType>(false); // Create a new internal root
         newRoot->keys.push_back(pivotKey); // Promote the pivot key
         newRoot->children.push_back(oldRoot); // Add old root as left child
@@ -712,14 +809,18 @@ public:
     }
 
 
+	// display the tree
     template <typename KeyType, typename ValueType>
-    void display(Node<KeyType, ValueType>* node, int level) {
+    void display(Node<KeyType, ValueType>* node, int level) 
+    {
         if (!node) return;
 
         // Print the keys of the current node
         cout << string(level * 2, ' ') << "[";
-        for (size_t i = 0; i < node->keys.size(); i++) {
-            if (!node->isLeaf) {
+        for (size_t i = 0; i < node->keys.size(); i++) 
+        {
+            if (!node->isLeaf) 
+            {
                 cout << node->keys[i] << " ";
             }
             else
@@ -732,13 +833,15 @@ public:
         {
             cout << " (buffer: ";
             // Print the operations in the buffer
-            for (auto& op : node->buffer) {
+            for (auto& op : node->buffer) 
+            {
                 Operations opType = std::get<0>(op); // Operation type
                 KeyType key = std::get<1>(op);          // Key
                 ValueType value = std::get<2>(op);        // Value
 
                 // Determine the operation type and display it
-                switch (opType) {
+                switch (opType) 
+                {
                 case Operations::Insert:
                     cout << "INSERT(" << key << ":" << value << ") ";
                     break;
@@ -759,17 +862,21 @@ public:
         cout << endl;
 
         // Recursively display child nodes
-        for (Node<KeyType, ValueType>* child : node->children) {
+        for (Node<KeyType, ValueType>* child : node->children) 
+        {
             display(child, level + 1);
         }
     }
 
 
+	// find the parent of a child node
     template <typename KeyType, typename ValueType>
-    Node<KeyType, ValueType>* findParent(Node<KeyType, ValueType>* current, Node<KeyType, ValueType>* child) {
+    Node<KeyType, ValueType>* findParent(Node<KeyType, ValueType>* current, Node<KeyType, ValueType>* child) 
+    {
         if (!current || current->isLeaf) return nullptr;
 
-        for (size_t i = 0; i < current->children.size(); i++) {
+        for (size_t i = 0; i < current->children.size(); i++) 
+        {
             if (current->children[i] == child) return current;
             Node<KeyType, ValueType>* parent = findParent(current->children[i], child);
             if (parent) return parent;
@@ -778,13 +885,17 @@ public:
     }
 
 
+    // check if a tree is balanced
     template <typename KeyType, typename ValueType>
-    bool isBalanced(Node<KeyType, ValueType>* node, int depth, int& leafDepth) {
+    bool isBalanced(Node<KeyType, ValueType>* node, int depth, int& leafDepth) 
+    {
         if (!node) return true; // Empty tree is balanced
 
         // Check if it's a leaf node
-        if (node->isLeaf) {
-            if (leafDepth == -1) {
+        if (node->isLeaf) 
+        {
+            if (leafDepth == -1) 
+            {
                 leafDepth = depth; // Set depth for the first leaf
             }
             return depth == leafDepth; // All leaves must have the same depth
@@ -796,8 +907,10 @@ public:
         if (!node->isLeaf && node->buffer.size() > bufferSize) return false;
 
         // Recursively check all children
-        for (size_t i = 0; i < node->children.size(); ++i) {
-            if (!isBalanced(node->children[i], depth + 1, leafDepth)) {
+        for (size_t i = 0; i < node->children.size(); ++i) 
+        {
+            if (!isBalanced(node->children[i], depth + 1, leafDepth)) 
+            {
                 return false;
             }
 
@@ -809,8 +922,10 @@ public:
     }
 
 
+    // call isTreeBalanced
     template <typename KeyType, typename ValueType>
-    bool isTreeBalanced() {
+    bool isTreeBalanced() 
+    {
         int leafDepth = -1; // Depth of the first encountered leaf
         return isBalanced(root, 0, leafDepth);
     }

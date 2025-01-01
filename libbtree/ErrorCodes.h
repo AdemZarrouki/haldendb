@@ -1,10 +1,11 @@
 #pragma once
 
-enum class ErrorCode {
+enum class ErrorCode 
+{
     Success,
     Error,
     InsertFailed,
     ChildSplitCalledOnLeafNode,
     KeyDoesNotExist,
-    TreeEmpty,
+    TreeEmpty
 };

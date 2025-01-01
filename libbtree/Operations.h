@@ -1,7 +1,8 @@
 #pragma once
 #pragma once
 
-enum class Operations {
+enum class Operations 
+{
     Insert,
     Search,
     Update,

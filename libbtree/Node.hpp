@@ -6,13 +6,14 @@
 using namespace std;
 
 template <typename KeyType, typename ValueType>
-class Node {
+class Node 
+{
 public:
     bool isLeaf;
     vector<KeyType> keys;
     vector<ValueType> values;
     vector<Node*> children;
-    vector<tuple<Operations, KeyType, ValueType>> buffer; // Buffer for internal nodes (key-value pairs)
+    vector<tuple<Operations, KeyType, ValueType>> buffer;
 
     Node(bool isLeaf) : isLeaf(isLeaf) {}
     ~Node() {}
