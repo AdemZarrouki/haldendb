@@ -102,6 +102,7 @@ public:
         return ErrorCode::Success;
     }
 
+
     // Handle underflow in a node
     template <typename KeyType, typename ValueType>
     ErrorCode handleUnderflow(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* node) 
@@ -163,6 +164,7 @@ public:
 
         return ErrorCode::Success;
     }
+
 
     // Merge two nodes
     template <typename KeyType, typename ValueType>
@@ -929,4 +931,73 @@ public:
         int leafDepth = -1; // Depth of the first encountered leaf
         return isBalanced(root, 0, leafDepth);
     }
+
+	// Upsert a key-value pair into the tree
+    template <typename KeyType, typename ValueType>
+	ErrorCode upsert(KeyType key, ValueType value)
+	{
+        if (!root)
+        {
+            root = new Node<KeyType, ValueType>(true); // Create a new root as a leaf
+            root->keys.push_back(key); // Insert the key directly
+            root->values.push_back(value); // Insert the value directly
+            return ErrorCode::Success;
+        }
+
+        Node<KeyType, ValueType>* current = root;
+
+        // Traverse the tree to find the appropriate node
+        if (!current->isLeaf)
+        {
+            // Case: Add to the buffer of the root or current node
+            ErrorCode result = insertBuffered(current, Operations::Insert, key, value);
+            if (result != ErrorCode::Success)
+            {
+                return result;
+            }
+
+            // Flush the buffer if necessary
+            if (current->buffer.size() >= bufferSize)
+            {
+                ErrorCode result = flushBuffer(current);
+                if (result != ErrorCode::Success)
+                {
+                    return result;
+                }
+            }
+            return ErrorCode::Success;
+        }
+
+        else
+        { 
+            // Case: Leaf Node
+            // Find the correct position to insert the key while maintaining sorted order
+            auto it = std::find(current->keys.begin(), current->keys.end(), key);
+
+            if (it != current->keys.end()) {
+                // Update the value if the key exists
+
+                size_t index = std::distance(current->keys.begin(), it);
+                current->values[index] = value;
+            }
+            else {
+                // Insert the key-value pair if the key does not exist
+                auto it_keys = lower_bound(current->keys.begin(), current->keys.end(), key);
+                auto it_values = lower_bound(current->values.begin(), current->values.end(), key);
+
+                current->keys.insert(it_keys, key);
+                current->values.insert(it_values, value);
+                sort(current->values.begin(), current->values.end());
+
+                // Split the leaf if it becomes overfull
+                if (current->keys.size() >= m_nDegree) {
+                    Node<KeyType, ValueType>* parent = findParent(root, current);
+                    return splitLeaf(parent, current);
+                }
+            }
+
+            return ErrorCode::Success;
+        }
+	}
+
 };
