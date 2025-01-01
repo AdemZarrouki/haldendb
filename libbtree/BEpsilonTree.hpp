@@ -932,6 +932,7 @@ public:
         return isBalanced(root, 0, leafDepth);
     }
 
+
 	// Upsert a key-value pair into the tree
     template <typename KeyType, typename ValueType>
 	ErrorCode upsert(KeyType key, ValueType value)
@@ -974,13 +975,15 @@ public:
             // Find the correct position to insert the key while maintaining sorted order
             auto it = std::find(current->keys.begin(), current->keys.end(), key);
 
-            if (it != current->keys.end()) {
+            if (it != current->keys.end()) 
+            {
                 // Update the value if the key exists
 
                 size_t index = std::distance(current->keys.begin(), it);
                 current->values[index] = value;
             }
-            else {
+            else 
+            {
                 // Insert the key-value pair if the key does not exist
                 auto it_keys = lower_bound(current->keys.begin(), current->keys.end(), key);
                 auto it_values = lower_bound(current->values.begin(), current->values.end(), key);
@@ -990,7 +993,8 @@ public:
                 sort(current->values.begin(), current->values.end());
 
                 // Split the leaf if it becomes overfull
-                if (current->keys.size() >= m_nDegree) {
+                if (current->keys.size() >= m_nDegree) 
+                {
                     Node<KeyType, ValueType>* parent = findParent(root, current);
                     return splitLeaf(parent, current);
                 }
