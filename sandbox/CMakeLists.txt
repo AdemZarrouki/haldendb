@@ -27,7 +27,8 @@ add_subdirectory(../libbtree ${PROJECT_BINARY_DIR}/libbtree)
 set(CMAKE_CXX_COMPILER g++-11)
 
 #add_executable(sandbox sandbox.cpp)
-add_executable(TestBEpsilonTree TestBEpsilonTree.cpp)
+#add_executable(TestBEpsilonTree TestBEpsilonTree.cpp)
+add_executable(Benchmark Benchmark.cpp)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBPMEM REQUIRED libpmem)
