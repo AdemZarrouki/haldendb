@@ -423,7 +423,7 @@ public:
 
 
 	// Insert a key-value pair into the tree
-    template <typename KeyType, typename ValueType>
+    //template <typename KeyType, typename ValueType>
     ErrorCode insert(KeyType key, ValueType value) 
     {
         // Case: Tree is empty
@@ -465,7 +465,8 @@ public:
             // Find the correct position to insert the key while maintaining sorted order
             auto it_keys = lower_bound(current->keys.begin(), current->keys.end(), key);
             //int index = it - current->keys.begin();
-            auto it_values = lower_bound(current->values.begin(), current->values.end(), key);
+            //auto it_values = lower_bound(current->values.begin(), current->values.end(), key);
+            auto it_values = lower_bound(current->values.begin(), current->values.end(), value);
 
             // Insert the key and value at the determined position
             current->keys.insert(it_keys, key);
