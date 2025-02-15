@@ -1,4 +1,4 @@
-#include <iostream>
+/*#include <iostream>
 #include <vector>
 #include <algorithm>
 #include <utility>
@@ -196,7 +196,7 @@ void testRangeQuery(BEpsilonTree<int, int> tree, bool& allTestsPassed) {
     }
 }
 
-/*int main() {
+int main() {
 
     /*bool allTestsPassed = true;
     BEpsilonTree<int, int> tree1 = BEpsilonTree<int, int>(3, 3);

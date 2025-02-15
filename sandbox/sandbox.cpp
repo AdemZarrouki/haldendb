@@ -1,4 +1,4 @@
-#include <iostream>
+/*#include <iostream>
 #include "LRUCache.hpp"
 #include "BPlusStore.hpp"
 #include "NoCache.hpp"
@@ -536,7 +536,7 @@ void test_for_ints()
             BPlusStoreType ptrTree(nDegree);
             ptrTree.template init<DataNodeType>();
 
-            int_test<BPlusStoreType>(&ptrTree, 5000000);
+            int_test<BPlusStoreType>(&ptrTree, 100000000);
         }
 #else //__TREE_WITH_CACHE__
         {
@@ -1007,7 +1007,7 @@ return;
 
 }
 
-/*int main(int argc, char* argv[])
+int main(int argc, char* argv[])
 {
     //fptree_bm();
     quick_test();

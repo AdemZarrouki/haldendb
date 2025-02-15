@@ -29,6 +29,7 @@ set(CMAKE_CXX_COMPILER g++-11)
 #add_executable(sandbox sandbox.cpp)
 #add_executable(TestBEpsilonTree TestBEpsilonTree.cpp)
 add_executable(Benchmark Benchmark.cpp)
+#add_executable(Performance Performance.cpp)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBPMEM REQUIRED libpmem)
