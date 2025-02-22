@@ -31,10 +31,7 @@ public:
         this->bufferSize = bufferSize;
     }
 
-    ~BEpsilonTree() 
-    {
-        deleteTree(root);
-    }
+    ~BEpsilonTree() = default;  // Smart pointers clean up automatically
 
 private:
     template <typename KeyType, typename ValueType>
