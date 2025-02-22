@@ -20,13 +20,13 @@ template <typename KeyType, typename ValueType>
 class BEpsilonTree 
 {
 public:
-    Node<KeyType, ValueType>* root;
+    std::shared_ptr<Node<KeyType, ValueType>> root;
     uint32_t m_nDegree;
     uint32_t bufferSize;
 
     BEpsilonTree(int m_nDegree, int bufferSize) 
     {
-        root = new Node<KeyType, ValueType>(true);
+        root = std::make_shared<Node<KeyType, ValueType>>(true);
         this->m_nDegree = m_nDegree;
         this->bufferSize = bufferSize;
     }
@@ -38,17 +38,18 @@ public:
 
 private:
     template <typename KeyType, typename ValueType>
-    void deleteTree(Node<KeyType, ValueType>* node) 
+    void deleteTree(std::shared_ptr<Node<KeyType, ValueType>> node)
     {
         if (!node) return;
 
         // Recursively delete all children
-        for (Node<KeyType, ValueType>* child : node->children) 
+        for (std::shared_ptr<Node<KeyType, ValueType>> child : node->children)
         {
             deleteTree(child);
         }
 
-        delete node;
+        //delete node;
+        node.reset();
     }
 
 public:
@@ -61,7 +62,7 @@ public:
             return ErrorCode::KeyDoesNotExist; // Tree is empty
         }
 
-        Node<KeyType, ValueType>* current = root;
+		std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
         if (!current->isLeaf) 
         {
@@ -94,7 +95,7 @@ public:
         // Handle underflow if necessary
         if (current->keys.size() < (m_nDegree / 2)) 
         {
-            Node<KeyType, ValueType>* parent = findParent(root, current);
+			std::shared_ptr<Node<KeyType, ValueType>> parent = findParent(root, current);
             ErrorCode result = handleUnderflow(parent, current);
             if (result != ErrorCode::Success) return result;
         }
@@ -105,14 +106,14 @@ public:
 
     // Handle underflow in a node
     template <typename KeyType, typename ValueType>
-    ErrorCode handleUnderflow(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* node) 
+	ErrorCode handleUnderflow(std::shared_ptr<Node<KeyType, ValueType>> parent, std::shared_ptr<Node<KeyType, ValueType>> node)
     {
         if (!parent) return ErrorCode::Success; // Root doesn't underflow
 
         // Find the sibling of the underflowed node
         size_t index = std::find(parent->children.begin(), parent->children.end(), node) - parent->children.begin();
-        Node<KeyType, ValueType>* leftSibling = (index > 0) ? parent->children[index - 1] : nullptr;
-        Node<KeyType, ValueType>* rightSibling = (index + 1 < parent->children.size()) ? parent->children[index + 1] : nullptr;
+		std::shared_ptr<Node<KeyType, ValueType>> leftSibling = (index > 0) ? parent->children[index - 1] : nullptr;
+		std::shared_ptr<Node<KeyType, ValueType>> rightSibling = (index + 1 < parent->children.size()) ? parent->children[index + 1] : nullptr;
 
         // Try to borrow from left sibling
         if (leftSibling && leftSibling->keys.size() > (m_nDegree / 2)) 
@@ -168,7 +169,7 @@ public:
 
     // Merge two nodes
     template <typename KeyType, typename ValueType>
-    void mergeNodes(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* left, Node<KeyType, ValueType>* right, size_t separatorIndex) 
+	void mergeNodes(std::shared_ptr<Node<KeyType, ValueType>> parent, std::shared_ptr<Node<KeyType, ValueType>> left, std::shared_ptr<Node<KeyType, ValueType>> right, size_t separatorIndex)
     {
         // Move the separator key from the parent to the left node
         left->keys.push_back(parent->keys[separatorIndex]);
@@ -186,7 +187,8 @@ public:
         parent->keys.erase(parent->keys.begin() + separatorIndex);
         parent->children.erase(parent->children.begin() + separatorIndex + 1);
 
-        delete right;
+        //delete right;
+		right.reset();
     }
 
 
@@ -194,7 +196,7 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode update(KeyType key, ValueType newValue) 
     {
-        Node<KeyType, ValueType>* current = root;
+		std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
         if (!current->isLeaf) 
         {
@@ -235,7 +237,7 @@ public:
         {
             return ErrorCode::KeyDoesNotExist; // Tree is empty
         }
-        Node<KeyType, ValueType>* current = root;
+		std::shared_ptr<Node<KeyType, ValueType>> current = root;
         vector<tuple<Operations, KeyType, ValueType>> collectedMessages;
 
         // Traverse the tree
@@ -325,7 +327,7 @@ public:
     std::vector<std::pair<KeyType, ValueType>> rangeQuery(KeyType low, KeyType high) 
     {
         std::vector<std::pair<KeyType, ValueType>> result;
-        Node<KeyType, ValueType>* current = root;
+		std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
         // Traverse to the first relevant leaf node
         while (!current->isLeaf) 
@@ -380,7 +382,7 @@ public:
             }
 
             // Find the next leaf node using parent-child relationship
-            Node<KeyType, ValueType>* parent = findParent(root, current);
+			std::shared_ptr<Node<KeyType, ValueType>> parent = findParent(root, current);
             while (parent) 
             {
                 size_t index = std::find(parent->children.begin(), parent->children.end(), current) - parent->children.begin();
@@ -429,13 +431,13 @@ public:
         // Case: Tree is empty
         if (!root) 
         {
-            root = new Node<KeyType, ValueType>(true); // Create a new root as a leaf
+			root = std::make_shared<Node<KeyType, ValueType>>(true);
             root->keys.push_back(key); // Insert the key directly
             root->values.push_back(value); // Insert the value directly
             return ErrorCode::Success;
         }
 
-        Node<KeyType, ValueType>* current = root;
+		std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
         // Traverse the tree to find the appropriate node
         if (!current->isLeaf) 
@@ -476,7 +478,7 @@ public:
             // If the leaf is overfull, split it
             if (current->keys.size() >= m_nDegree) 
             {
-                Node<KeyType, ValueType>* parent = findParent(root, current);
+				std::shared_ptr<Node<KeyType, ValueType>> parent = findParent(root, current);
                 ErrorCode result = splitLeaf(parent, current);
                 if (result != ErrorCode::Success) 
                 {
@@ -490,7 +492,7 @@ public:
 
     // Insert an operation to the buffer of an Internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode insertBuffered(Node<KeyType, ValueType>* node, Operations operation, KeyType key, ValueType value) 
+	ErrorCode insertBuffered(std::shared_ptr<Node<KeyType, ValueType>> node, Operations operation, KeyType key, ValueType value)
     {
         auto it = std::find_if(node->buffer.begin(), node->buffer.end(),
             [key](const tuple<Operations, KeyType, ValueType>& op) {
@@ -557,7 +559,7 @@ public:
 
 	// Flush the buffer of an Internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode flushBuffer(Node<KeyType, ValueType>* node) 
+	ErrorCode flushBuffer(std::shared_ptr<Node<KeyType, ValueType>> node)
     {
         if (node->isLeaf || node->buffer.empty()) return ErrorCode::Success;
         auto bufferCopy = node->buffer;
@@ -573,7 +575,7 @@ public:
             size_t i = std::upper_bound(node->keys.begin(), node->keys.end(), key) - node->keys.begin();
             if (i >= node->children.size()) return ErrorCode::Error;
 
-            Node<KeyType, ValueType>* child = node->children[i];
+			std::shared_ptr<Node<KeyType, ValueType>> child = node->children[i];
 
             switch (opType)
             {
@@ -685,7 +687,8 @@ public:
 
 	// propagate an operation to the buffer of a child node
     template <typename KeyType, typename ValueType>
-    ErrorCode propagateToBuffer(Node<KeyType, ValueType>* child, Operations opType, KeyType key, ValueType value) {
+	ErrorCode propagateToBuffer(std::shared_ptr<Node<KeyType, ValueType>> child, Operations opType, KeyType key, ValueType value)
+    {
         child->buffer.emplace_back(opType, key, value);
         if (child->buffer.size() >= bufferSize) 
         {
@@ -697,9 +700,9 @@ public:
 
 	// split a leaf node
     template <typename KeyType, typename ValueType>
-    ErrorCode splitLeaf(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* leaf) 
+	ErrorCode splitLeaf(std::shared_ptr<Node<KeyType, ValueType>> parent, std::shared_ptr<Node<KeyType, ValueType>> leaf)
     {
-        Node<KeyType, ValueType>* sibling = new Node<KeyType, ValueType>(true); // Create a new sibling (leaf)
+		std::shared_ptr<Node<KeyType, ValueType>> sibling = std::make_shared<Node<KeyType, ValueType>>(true);
 
         // Determine the split point
         int mid = leaf->keys.size() / 2;
@@ -716,7 +719,7 @@ public:
         if (!parent) 
         {
             // Case: Leaf node is the root, so create a new root
-            Node<KeyType, ValueType>* newRoot = new Node<KeyType, ValueType>(false); // New internal root
+			std::shared_ptr<Node<KeyType, ValueType>> newRoot = std::make_shared<Node<KeyType, ValueType>>(false);
             newRoot->keys.push_back(pivotKey); // Promote pivot key to the root
             newRoot->children.push_back(leaf); // Add current leaf as the left child
             newRoot->children.push_back(sibling); // Add sibling as the right child
@@ -734,7 +737,7 @@ public:
             // Check if the parent needs to split
             if (parent->keys.size() >= m_nDegree) 
             {
-                Node<KeyType, ValueType>* grandparent = findParent(root, parent);
+				std::shared_ptr<Node<KeyType, ValueType>> grandparent = findParent(root, parent);
                 return splitInternal(grandparent, parent);
             }
         }
@@ -745,9 +748,9 @@ public:
 
 	// split an internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode splitInternal(Node<KeyType, ValueType>* parent, Node<KeyType, ValueType>* internal) 
+	ErrorCode splitInternal(std::shared_ptr<Node<KeyType, ValueType>> parent, std::shared_ptr<Node<KeyType, ValueType>> internal)
     {
-        Node<KeyType, ValueType>* sibling = new Node<KeyType, ValueType>(false); // Create a new sibling (internal node)
+		std::shared_ptr<Node<KeyType, ValueType>> sibling = std::make_shared<Node<KeyType, ValueType>>(false);
 
         // Determine the split point
         int mid = internal->keys.size() / 2;
@@ -790,7 +793,7 @@ public:
             // Check if the parent needs to split
             if (parent->keys.size() >= m_nDegree) 
             {
-                Node<KeyType, ValueType>* grandparent = findParent(root, parent);
+				std::shared_ptr<Node<KeyType, ValueType>> grandparent = findParent(root, parent);
                 return splitInternal(grandparent, parent);
             }
         }
@@ -801,9 +804,9 @@ public:
     
 	// Handle root split
     template <typename KeyType, typename ValueType>
-    ErrorCode handleRootSplit(Node<KeyType, ValueType>* oldRoot, Node<KeyType, ValueType>* sibling, KeyType pivotKey) 
+	ErrorCode handleRootSplit(std::shared_ptr<Node<KeyType, ValueType>> oldRoot, std::shared_ptr<Node<KeyType, ValueType>> sibling, KeyType pivotKey)
     {
-        Node<KeyType, ValueType>* newRoot = new Node<KeyType, ValueType>(false); // Create a new internal root
+		std::shared_ptr<Node<KeyType, ValueType>> newRoot = std::make_shared<Node<KeyType, ValueType>>(false);
         newRoot->keys.push_back(pivotKey); // Promote the pivot key
         newRoot->children.push_back(oldRoot); // Add old root as left child
         newRoot->children.push_back(sibling); // Add sibling as right child
@@ -814,7 +817,7 @@ public:
 
 	// display the tree
     template <typename KeyType, typename ValueType>
-    void display(Node<KeyType, ValueType>* node, int level) 
+	void display(std::shared_ptr<Node<KeyType, ValueType>> node, int level)
     {
         if (!node) return;
 
@@ -865,7 +868,7 @@ public:
         cout << endl;
 
         // Recursively display child nodes
-        for (Node<KeyType, ValueType>* child : node->children) 
+		for (std::shared_ptr<Node<KeyType, ValueType>> child : node->children)
         {
             display(child, level + 1);
         }
@@ -874,14 +877,14 @@ public:
 
 	// find the parent of a child node
     template <typename KeyType, typename ValueType>
-    Node<KeyType, ValueType>* findParent(Node<KeyType, ValueType>* current, Node<KeyType, ValueType>* child) 
+	std::shared_ptr<Node<KeyType, ValueType>> findParent(std::shared_ptr<Node<KeyType, ValueType>> current, std::shared_ptr<Node<KeyType, ValueType>> child)
     {
         if (!current || current->isLeaf) return nullptr;
 
         for (size_t i = 0; i < current->children.size(); i++) 
         {
             if (current->children[i] == child) return current;
-            Node<KeyType, ValueType>* parent = findParent(current->children[i], child);
+			std::shared_ptr<Node<KeyType, ValueType>> parent = findParent(current->children[i], child);
             if (parent) return parent;
         }
         return nullptr;
@@ -890,7 +893,7 @@ public:
 
     // check if a tree is balanced
     template <typename KeyType, typename ValueType>
-    bool isBalanced(Node<KeyType, ValueType>* node, int depth, int& leafDepth) 
+	bool isBalanced(std::shared_ptr<Node<KeyType, ValueType>> node, int depth, int& leafDepth)
     {
         if (!node) return true; // Empty tree is balanced
 
@@ -940,13 +943,13 @@ public:
 	{
         if (!root)
         {
-            root = new Node<KeyType, ValueType>(true); // Create a new root as a leaf
+            root = std::make_shared<Node<KeyType, ValueType>>(true); // Create a new root as a leaf
             root->keys.push_back(key); // Insert the key directly
             root->values.push_back(value); // Insert the value directly
             return ErrorCode::Success;
         }
 
-        Node<KeyType, ValueType>* current = root;
+		std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
         // Traverse the tree to find the appropriate node
         if (!current->isLeaf)
@@ -996,7 +999,7 @@ public:
                 // Split the leaf if it becomes overfull
                 if (current->keys.size() >= m_nDegree) 
                 {
-                    Node<KeyType, ValueType>* parent = findParent(root, current);
+					std::shared_ptr<Node<KeyType, ValueType>> parent = findParent(root, current);
                     return splitLeaf(parent, current);
                 }
             }
