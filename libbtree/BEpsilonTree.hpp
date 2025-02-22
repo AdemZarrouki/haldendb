@@ -470,7 +470,7 @@ public:
             // Insert the key and value at the determined position
             current->keys.insert(it_keys, key);
             current->values.insert(it_values, value);
-            sort(current->values.begin(), current->values.end());
+            //sort(current->values.begin(), current->values.end());
 
             // If the leaf is overfull, split it
             if (current->keys.size() >= m_nDegree) 
