@@ -6,7 +6,7 @@
 using namespace std;
 
 template <typename KeyType, typename ValueType>
-class Node 
+class Node
 {
 public:
     bool isLeaf;
