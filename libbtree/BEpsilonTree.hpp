@@ -15,6 +15,9 @@
 #include <map>
 #include <fstream>
 #include <queue>
+#include <iomanip>
+#include <ctime>
+#include <chrono>
 
 using namespace std;
 
@@ -88,13 +91,31 @@ public:
 
 private:
     void checkpoint() {
+        // Save tree to disk
         saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
+
+        // Create timestamped backup of WAL
+        const auto now = std::chrono::system_clock::now();
+        const auto time = std::chrono::system_clock::to_time_t(now);
+        std::tm utcTime;
+        gmtime_s(&utcTime, &time);
+
+        std::stringstream timestamp;
+        timestamp << std::put_time(&utcTime, "%Y-%m-%d_%H-%M-%S");
+
+        std::string backupFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_backup" + timestamp.str() + ".bak";
+
+        std::ifstream src(logFilename, std::ios::binary);
+        std::ofstream dst(backupFilename, std::ios::binary);
+        dst << src.rdbuf();
+
+        // Clear the WAL
         std::ofstream clearLog(logFilename, std::ios::trunc);
         clearLog.close();
 
-        std::cout << "[CHECKPOINT] Saved tree + cleared WAL after "
-            << checkpointFrequency << " ops.\n";
+        std::cout << "[CHECKPOINT] Tree saved, WAL cleared, backup created: " << backupFilename << "\n";
     }
+
 
     void logOperation(const std::string& op, const KeyType& key, const ValueType& value = ValueType{}) {
         std::ofstream log(logFilename, std::ios_base::app | std::ios_base::out);
