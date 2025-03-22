@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Node.hpp"
 #include "ErrorCodes.h"
 #include "Operations.h"
@@ -18,6 +18,8 @@
 
 using namespace std;
 
+
+
 template <typename KeyType, typename ValueType>
 class BEpsilonTree
 {
@@ -25,38 +27,90 @@ public:
     std::shared_ptr<Node<KeyType, ValueType>> root;
     uint32_t m_nDegree;
     uint32_t bufferSize;
+    std::string logFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_test1.log";
+    int opCounter = 0;
+    int checkpointFrequency = 5;
 
-    BEpsilonTree(int m_nDegree, int bufferSize)
-    {
-        root = std::make_shared<Node<KeyType, ValueType>>(true);
-        this->m_nDegree = m_nDegree;
-        this->bufferSize = bufferSize;
-    }
 
-    BEpsilonTree(int m_nDegree, int bufferSize, const std::string& filename) 
+    BEpsilonTree(int m_nDegree, int bufferSize, const std::string& filename, int checkpointFrequency = -1)
     {
         this->m_nDegree = m_nDegree;
         this->bufferSize = bufferSize;
+        if (checkpointFrequency > 0)
+            this->checkpointFrequency = checkpointFrequency;
 
         // Try loading tree from file
         std::ifstream inFile(filename, std::ios::binary);
-        if (inFile) 
+        if (inFile)
         {
             root = loadTreeFromFile(filename);
         }
-        else 
+        else
         {
             root = std::make_shared<Node<KeyType, ValueType>>(true); // New tree
         }
+
+        // === WAL REPLAY GOES HERE ===
+        std::ifstream wal(logFilename);
+        if (wal.is_open()) {
+            std::string op;
+            KeyType key;
+            ValueType value;
+
+            while (wal >> op >> key) {
+                if (op == "INSERT" || op == "UPDATE" || op == "UPSERT") {
+                    wal >> value;
+                }
+
+                if (op == "INSERT") {
+                    insert(key, value);
+                }
+                else if (op == "UPDATE") {
+                    update(key, value);
+                }
+                else if (op == "UPSERT") {
+                    upsert(key, value);
+                }
+                else if (op == "DELETE") {
+                    remove(key);
+                }
+            }
+            wal.close();
+        }
     }
 
-    ~BEpsilonTree() 
+    ~BEpsilonTree()
     {
-        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
+        if (opCounter > 0) {
+            checkpoint();
+        }
     }
-
 
 private:
+    void checkpoint() {
+        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
+        std::ofstream clearLog(logFilename, std::ios::trunc);
+        clearLog.close();
+
+        std::cout << "[CHECKPOINT] Saved tree + cleared WAL after "
+            << checkpointFrequency << " ops.\n";
+    }
+
+    void logOperation(const std::string& op, const KeyType& key, const ValueType& value = ValueType{}) {
+        std::ofstream log(logFilename, std::ios_base::app | std::ios_base::out);
+
+        if (op == "DELETE")
+        {
+            log << op << " " << key << "\n";
+        }
+        else
+        {
+            log << op << " " << key << " " << value << "\n";
+        }
+
+        log.close();
+    }
+
     template <typename KeyType, typename ValueType>
     void deleteTree(std::shared_ptr<Node<KeyType, ValueType>> node)
     {
@@ -74,10 +128,10 @@ private:
 
 
     // Function to save the tree to a file
-    void saveTreeToFile(const std::shared_ptr<Node<KeyType, ValueType>>& root, const std::string& filename) 
+    void saveTreeToFile(const std::shared_ptr<Node<KeyType, ValueType>>& root, const std::string& filename)
     {
         std::ofstream outFile(filename, std::ios::binary);
-        if (!outFile) 
+        if (!outFile)
         {
             std::cerr << " Error: Could not create file '" << filename << "' for writing!" << std::endl;
             return;
@@ -86,7 +140,7 @@ private:
         std::queue<std::shared_ptr<Node<KeyType, ValueType>>> q;
         q.push(root);
 
-        while (!q.empty()) 
+        while (!q.empty())
         {
             auto node = q.front();
             q.pop();
@@ -98,7 +152,7 @@ private:
             outFile.write(reinterpret_cast<char*>(&keyCount), sizeof(size_t));
             outFile.write(reinterpret_cast<char*>(node->keys.data()), keyCount * sizeof(KeyType));
 
-            if (isLeaf) 
+            if (isLeaf)
             {
                 // Only leaf nodes store values
                 size_t valueCount = node->values.size();
@@ -106,12 +160,12 @@ private:
                 outFile.write(reinterpret_cast<char*>(node->values.data()), valueCount * sizeof(ValueType));
             }
 
-            if (!isLeaf) 
+            if (!isLeaf)
             {
                 size_t childCount = node->children.size();
                 outFile.write(reinterpret_cast<char*>(&childCount), sizeof(size_t));
 
-                for (auto& child : node->children) 
+                for (auto& child : node->children)
                 {
                     q.push(child);
                 }
@@ -122,10 +176,10 @@ private:
 
 
     // Function to load the tree from a file
-    std::shared_ptr<Node<KeyType, ValueType>> loadTreeFromFile(const std::string& filename) 
+    std::shared_ptr<Node<KeyType, ValueType>> loadTreeFromFile(const std::string& filename)
     {
         std::ifstream inFile(filename, std::ios::binary);
-        if (!inFile) 
+        if (!inFile)
         {
             std::cerr << " Error opening file for reading!" << std::endl;
             return nullptr;
@@ -135,7 +189,7 @@ private:
         std::queue<std::shared_ptr<Node<KeyType, ValueType>>> q;
         q.push(root);
 
-        while (!q.empty()) 
+        while (!q.empty())
         {
             auto node = q.front();
             q.pop();
@@ -146,7 +200,7 @@ private:
             inFile.read(reinterpret_cast<char*>(&isLeaf), sizeof(bool));
             inFile.read(reinterpret_cast<char*>(&keyCount), sizeof(size_t));
 
-            if (inFile.eof() || inFile.fail()) 
+            if (inFile.eof() || inFile.fail())
             {
                 std::cerr << " Error reading node metadata! File may be corrupted." << std::endl;
                 return nullptr;
@@ -156,12 +210,12 @@ private:
             node->keys.resize(keyCount);
             inFile.read(reinterpret_cast<char*>(node->keys.data()), keyCount * sizeof(KeyType));
 
-            if (isLeaf) 
+            if (isLeaf)
             {
                 size_t valueCount;
                 inFile.read(reinterpret_cast<char*>(&valueCount), sizeof(size_t));
 
-                if (valueCount != keyCount) 
+                if (valueCount != keyCount)
                 {
                     std::cerr << " ERROR: Value count mismatch! Keys: " << keyCount << ", Values: " << valueCount << std::endl;
                     return nullptr;
@@ -171,7 +225,7 @@ private:
                 inFile.read(reinterpret_cast<char*>(node->values.data()), valueCount * sizeof(ValueType));
             }
 
-            if (!isLeaf) 
+            if (!isLeaf)
             {
                 size_t childCount;
                 inFile.read(reinterpret_cast<char*>(&childCount), sizeof(size_t));
@@ -196,6 +250,7 @@ public:
         {
             return ErrorCode::KeyDoesNotExist; // Tree is empty
         }
+        logOperation("DELETE", key);
 
         std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
@@ -210,6 +265,12 @@ public:
             {
                 result = flushBuffer(current);
                 if (result != ErrorCode::Success) return result;
+            }
+
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
             }
             return ErrorCode::Success;
         }
@@ -235,6 +296,11 @@ public:
             if (result != ErrorCode::Success) return result;
         }
 
+        if (++opCounter >= checkpointFrequency)
+        {
+            checkpoint();
+            opCounter = 0;
+        }
         return ErrorCode::Success;
     }
 
@@ -331,6 +397,7 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode update(KeyType key, ValueType newValue)
     {
+        logOperation("UPDATE", key, newValue);
         std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
         if (!current->isLeaf)
@@ -345,6 +412,12 @@ public:
                 result = flushBuffer(current);
                 if (result != ErrorCode::Success) return result;
             }
+
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
+            }
             return ErrorCode::Success;
         }
 
@@ -358,6 +431,12 @@ public:
         else
         {
             return ErrorCode::KeyDoesNotExist; // Key not found
+        }
+
+        if (++opCounter >= checkpointFrequency)
+        {
+            checkpoint();
+            opCounter = 0;
         }
 
         return ErrorCode::Success;
@@ -560,15 +639,22 @@ public:
 
 
     // Insert a key-value pair into the tree
-    //template <typename KeyType, typename ValueType>
+    template <typename KeyType, typename ValueType>
     ErrorCode insert(KeyType key, ValueType value)
     {
+        logOperation("INSERT", key, value);
+
         // Case: Tree is empty
         if (!root)
         {
             root = std::make_shared<Node<KeyType, ValueType>>(true);
             root->keys.push_back(key); // Insert the key directly
             root->values.push_back(value); // Insert the value directly
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
+            }
             return ErrorCode::Success;
         }
 
@@ -592,6 +678,12 @@ public:
                 {
                     return result;
                 }
+            }
+
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
             }
             return ErrorCode::Success;
         }
@@ -619,6 +711,12 @@ public:
                 {
                     return result;
                 }
+            }
+
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
             }
             return ErrorCode::Success;
         }
@@ -1076,11 +1174,18 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode upsert(KeyType key, ValueType value)
     {
+        logOperation("UPSERT", key, value);
+
         if (!root)
         {
             root = std::make_shared<Node<KeyType, ValueType>>(true); // Create a new root as a leaf
             root->keys.push_back(key); // Insert the key directly
             root->values.push_back(value); // Insert the value directly
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
+            }
             return ErrorCode::Success;
         }
 
@@ -1104,6 +1209,12 @@ public:
                 {
                     return result;
                 }
+            }
+
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
             }
             return ErrorCode::Success;
         }
@@ -1137,6 +1248,12 @@ public:
                     std::shared_ptr<Node<KeyType, ValueType>> parent = findParent(root, current);
                     return splitLeaf(parent, current);
                 }
+            }
+
+            if (++opCounter >= checkpointFrequency)
+            {
+                checkpoint();
+                opCounter = 0;
             }
 
             return ErrorCode::Success;
