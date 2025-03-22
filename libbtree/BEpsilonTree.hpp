@@ -54,56 +54,84 @@ public:
         }
 
         // === WAL REPLAY GOES HERE ===
-        std::ifstream wal(logFilename);
-        if (wal.is_open()) {
-            std::string op;
-            KeyType key;
-            ValueType value;
+        std::ifstream walBin("C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal", std::ios::binary);
+        if (walBin.is_open()) {
+            while (!walBin.eof()) {
+                uint8_t opCode;
+                KeyType key;
+                ValueType value;
 
-            while (wal >> op >> key) {
-                if (op == "INSERT" || op == "UPDATE" || op == "UPSERT") {
-                    wal >> value;
+                walBin.read(reinterpret_cast<char*>(&opCode), sizeof(opCode));
+                if (walBin.eof()) break;  // avoid re-reading last byte
+
+                walBin.read(reinterpret_cast<char*>(&key), sizeof(KeyType));
+
+                Operations op = static_cast<Operations>(opCode);
+                if (op == Operations::Insert || op == Operations::Update) {
+                    walBin.read(reinterpret_cast<char*>(&value), sizeof(ValueType));
                 }
 
-                if (op == "INSERT") {
+                switch (op) {
+                case Operations::Insert:
                     insert(key, value);
-                }
-                else if (op == "UPDATE") {
+                    break;
+                case Operations::Update:
                     update(key, value);
-                }
-                else if (op == "UPSERT") {
-                    upsert(key, value);
-                }
-                else if (op == "DELETE") {
+                    break;
+                case Operations::Delete:
                     remove(key);
+                    break;
+                default:
+                    std::cerr << "[WARN] Unsupported op in binary WAL: " << static_cast<int>(op) << "\n";
+                    break;
                 }
             }
-            wal.close();
         }
+        walBin.close();
     }
 
     ~BEpsilonTree()
     {
+        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
+
         if (opCounter > 0) {
             checkpoint();
         }
+
+        // === Backup and clear binary WAL ===
+        const std::string binWal = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal";
+        const std::string bakName = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_bin_backup" + timestampename() +  ".bak";
+
+        std::ifstream src(binWal, std::ios::binary);
+        std::ofstream dst(bakName, std::ios::binary);
+        if (src && dst) {
+            dst << src.rdbuf();  // Backup binary WAL
+        }
+        src.close();
+        dst.close();
+
+        // Truncate original WAL file
+        std::ofstream clear(binWal, std::ios::trunc | std::ios::binary);
+        clear.close();
     }
 
 private:
+
+	std::string timestampename() {
+		const auto now = std::chrono::system_clock::now();
+		const auto time = std::chrono::system_clock::to_time_t(now);
+		std::tm utcTime;
+		gmtime_s(&utcTime, &time);
+		std::stringstream timestamp;
+		timestamp << std::put_time(&utcTime, "%Y-%m-%d_%H-%M-%S");
+		return timestamp.str();
+	}
+
     void checkpoint() {
         // Save tree to disk
-        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
+        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");       
 
-        // Create timestamped backup of WAL
-        const auto now = std::chrono::system_clock::now();
-        const auto time = std::chrono::system_clock::to_time_t(now);
-        std::tm utcTime;
-        gmtime_s(&utcTime, &time);
-
-        std::stringstream timestamp;
-        timestamp << std::put_time(&utcTime, "%Y-%m-%d_%H-%M-%S");
-
-        std::string backupFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_backup" + timestamp.str() + ".bak";
+        std::string backupFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_backup" + timestampename() + ".bak";
 
         std::ifstream src(logFilename, std::ios::binary);
         std::ofstream dst(backupFilename, std::ios::binary);
@@ -131,6 +159,25 @@ private:
 
         log.close();
     }
+
+    void logOperationBinary(Operations op, const KeyType& key, const ValueType& value = ValueType{}) {
+        std::ofstream log("C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal", std::ios::binary | std::ios::app);
+        if (!log.is_open()) {
+            std::cerr << "Failed to open binary WAL.\n";
+            return;
+        }
+
+        uint8_t opCode = static_cast<uint8_t>(op);
+        log.write(reinterpret_cast<const char*>(&opCode), sizeof(opCode));
+        log.write(reinterpret_cast<const char*>(&key), sizeof(KeyType));
+
+        if (op == Operations::Insert || op == Operations::Update) {
+            log.write(reinterpret_cast<const char*>(&value), sizeof(ValueType));
+        }
+
+        log.close();
+    }
+
 
     template <typename KeyType, typename ValueType>
     void deleteTree(std::shared_ptr<Node<KeyType, ValueType>> node)
