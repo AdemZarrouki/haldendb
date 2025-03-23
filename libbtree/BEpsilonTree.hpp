@@ -33,6 +33,7 @@ public:
     std::string logFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_test1.log";
     int opCounter = 0;
     int checkpointFrequency = 5;
+    bool isReplaying = false;
 
 
     BEpsilonTree(int m_nDegree, int bufferSize, const std::string& filename, int checkpointFrequency = -1)
@@ -56,6 +57,7 @@ public:
         // === WAL REPLAY GOES HERE ===
         std::ifstream walBin("C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal", std::ios::binary);
         if (walBin.is_open()) {
+            isReplaying = true;
             while (!walBin.eof()) {
                 uint8_t opCode;
                 KeyType key;
@@ -81,13 +83,20 @@ public:
                 case Operations::Delete:
                     remove(key);
                     break;
+                case Operations::Upsert:
+                    upsert(key, value);
+                    break;
                 default:
                     std::cerr << "[WARN] Unsupported op in binary WAL: " << static_cast<int>(op) << "\n";
                     break;
                 }
             }
         }
+        //flushBuffer(root);
         walBin.close();
+        isReplaying = false;
+        //flushBuffer(root);
+        
     }
 
     ~BEpsilonTree()
@@ -160,7 +169,18 @@ private:
         log.close();
     }
 
+    void maybeCheckpoint() {
+        if (isReplaying) return; // Avoid checkpointing during replay
+
+        if (++opCounter >= checkpointFrequency) {
+            checkpoint();
+            opCounter = 0;
+        }
+    }
+
+
     void logOperationBinary(Operations op, const KeyType& key, const ValueType& value = ValueType{}) {
+        if (isReplaying) return;
         std::ofstream log("C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal", std::ios::binary | std::ios::app);
         if (!log.is_open()) {
             std::cerr << "Failed to open binary WAL.\n";
@@ -318,7 +338,8 @@ public:
         {
             return ErrorCode::KeyDoesNotExist; // Tree is empty
         }
-        logOperation("DELETE", key);
+        if (isReplaying) return ErrorCode::Success;  // Prevent mutation during WAL replay
+        logOperationBinary(Operations::Delete, key);
 
         std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
@@ -335,11 +356,7 @@ public:
                 if (result != ErrorCode::Success) return result;
             }
 
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
 
@@ -364,11 +381,7 @@ public:
             if (result != ErrorCode::Success) return result;
         }
 
-        if (++opCounter >= checkpointFrequency)
-        {
-            checkpoint();
-            opCounter = 0;
-        }
+        maybeCheckpoint();
         return ErrorCode::Success;
     }
 
@@ -465,7 +478,8 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode update(KeyType key, ValueType newValue)
     {
-        logOperation("UPDATE", key, newValue);
+        if (isReplaying) return ErrorCode::Success;  // Prevent mutation during WAL replay
+        logOperationBinary(Operations::Update, key, newValue);
         std::shared_ptr<Node<KeyType, ValueType>> current = root;
 
         if (!current->isLeaf)
@@ -481,11 +495,7 @@ public:
                 if (result != ErrorCode::Success) return result;
             }
 
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
 
@@ -501,12 +511,7 @@ public:
             return ErrorCode::KeyDoesNotExist; // Key not found
         }
 
-        if (++opCounter >= checkpointFrequency)
-        {
-            checkpoint();
-            opCounter = 0;
-        }
-
+        maybeCheckpoint();
         return ErrorCode::Success;
     }
 
@@ -710,7 +715,8 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode insert(KeyType key, ValueType value)
     {
-        logOperation("INSERT", key, value);
+        if (isReplaying) return ErrorCode::Success;  // Prevent mutation during WAL replay
+        logOperationBinary(Operations::Insert, key, value);
 
         // Case: Tree is empty
         if (!root)
@@ -718,11 +724,7 @@ public:
             root = std::make_shared<Node<KeyType, ValueType>>(true);
             root->keys.push_back(key); // Insert the key directly
             root->values.push_back(value); // Insert the value directly
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
 
@@ -748,11 +750,7 @@ public:
                 }
             }
 
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
 
@@ -781,11 +779,7 @@ public:
                 }
             }
 
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
     }
@@ -1242,18 +1236,14 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode upsert(KeyType key, ValueType value)
     {
-        logOperation("UPSERT", key, value);
+        logOperationBinary(Operations::Upsert, key, value);
 
         if (!root)
         {
             root = std::make_shared<Node<KeyType, ValueType>>(true); // Create a new root as a leaf
             root->keys.push_back(key); // Insert the key directly
             root->values.push_back(value); // Insert the value directly
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
 
@@ -1279,11 +1269,7 @@ public:
                 }
             }
 
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
 
@@ -1318,12 +1304,7 @@ public:
                 }
             }
 
-            if (++opCounter >= checkpointFrequency)
-            {
-                checkpoint();
-                opCounter = 0;
-            }
-
+            maybeCheckpoint();
             return ErrorCode::Success;
         }
     }
