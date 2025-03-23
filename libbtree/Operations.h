@@ -6,5 +6,6 @@ enum class Operations
     Insert,
     Search,
     Update,
-    Delete
+    Delete,
+    Upsert
 };
