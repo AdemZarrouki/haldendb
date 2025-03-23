@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <ctime>
 #include <chrono>
+#include <unordered_map>
 
 using namespace std;
 
@@ -29,17 +30,22 @@ class BEpsilonTree
 public:
     std::shared_ptr<Node<KeyType, ValueType>> root;
     uint32_t m_nDegree;
-    uint32_t bufferSize;
     std::string logFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_test1.log";
     int opCounter = 0;
     int checkpointFrequency = 5;
     bool isReplaying = false;
 
+    // shared buffer as the design
+    std::unordered_map<KeyType, std::tuple<Operations, KeyType, ValueType>> sharedBuffer;
+    std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
+    std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
 
-    BEpsilonTree(int m_nDegree, int bufferSize, const std::string& filename, int checkpointFrequency = -1)
+
+
+
+    BEpsilonTree(int m_nDegree, const std::string& filename, int checkpointFrequency = -1)
     {
         this->m_nDegree = m_nDegree;
-        this->bufferSize = bufferSize;
         if (checkpointFrequency > 0)
             this->checkpointFrequency = checkpointFrequency;
 
@@ -153,21 +159,6 @@ private:
         std::cout << "[CHECKPOINT] Tree saved, WAL cleared, backup created: " << backupFilename << "\n";
     }
 
-
-    void logOperation(const std::string& op, const KeyType& key, const ValueType& value = ValueType{}) {
-        std::ofstream log(logFilename, std::ios_base::app | std::ios_base::out);
-
-        if (op == "DELETE")
-        {
-            log << op << " " << key << "\n";
-        }
-        else
-        {
-            log << op << " " << key << " " << value << "\n";
-        }
-
-        log.close();
-    }
 
     void maybeCheckpoint() {
         if (isReplaying) return; // Avoid checkpointing during replay
@@ -345,16 +336,8 @@ public:
 
         if (!current->isLeaf)
         {
-            // Add a Delete operation to the buffer
             ErrorCode result = insertBuffered(current, Operations::Delete, key, ValueType{});
             if (result != ErrorCode::Success) return result;
-
-            // Flush the buffer if it exceeds the buffer size
-            if (current->buffer.size() >= bufferSize)
-            {
-                result = flushBuffer(current);
-                if (result != ErrorCode::Success) return result;
-            }
 
             maybeCheckpoint();
             return ErrorCode::Success;
@@ -458,7 +441,8 @@ public:
         //left->keys.insert(left->keys.end(), right->keys.begin(), right->keys.end());
         //left->values.insert(left->values.end(), right->values.begin(), right->values.end());
 
-        if (!right->keys.size() == 1)
+        //if (!right->keys.size() == 1)
+        if (right->keys.size() != 1)
         {
             // Append all keys and values from the right sibling into the left sibling
             left->keys.insert(left->keys.end(), right->keys.begin(), right->keys.end());
@@ -484,16 +468,8 @@ public:
 
         if (!current->isLeaf)
         {
-            // Add an Update operation to the buffer
             ErrorCode result = insertBuffered(current, Operations::Update, key, newValue);
             if (result != ErrorCode::Success) return result;
-
-            // Flush the buffer if it exceeds the buffer size
-            if (current->buffer.size() >= bufferSize)
-            {
-                result = flushBuffer(current);
-                if (result != ErrorCode::Success) return result;
-            }
 
             maybeCheckpoint();
             return ErrorCode::Success;
@@ -520,93 +496,69 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode search(KeyType key, ValueType& value)
     {
-        if (!root)
-        {
-            return ErrorCode::KeyDoesNotExist; // Tree is empty
-        }
-        std::shared_ptr<Node<KeyType, ValueType>> current = root;
-        vector<tuple<Operations, KeyType, ValueType>> collectedMessages;
+        if (!root) return ErrorCode::KeyDoesNotExist;
 
-        // Traverse the tree
+        std::shared_ptr<Node<KeyType, ValueType>> current = root;
+
+        // Track if there's a message in the global buffer for this key
+        std::optional<std::tuple<Operations, KeyType, ValueType>> bufferedMessage;
+        auto it = sharedBuffer.find(key);
+        if (it != sharedBuffer.end())
+            bufferedMessage = it->second;
+
+        // Traverse down to the leaf
         while (!current->isLeaf)
         {
-            // Collect relevant messages for the key
-            for (const auto& message : current->buffer)
-            {
-                if (std::get<1>(message) == key)
-                {
-                    collectedMessages.emplace_back(message);
-                }
-            }
-
-            // Determine which child to descend into
             size_t i = std::upper_bound(current->keys.begin(), current->keys.end(), key) - current->keys.begin();
-            if (i >= current->children.size())
-            {
-                return ErrorCode::KeyDoesNotExist; // Key not found
-            }
-
+            if (i >= current->children.size()) return ErrorCode::KeyDoesNotExist;
             current = current->children[i];
         }
 
-        // Now we are in a leaf node
-        auto it = std::find(current->keys.begin(), current->keys.end(), key);
-
-        if (it != current->keys.end())
+        // Search the leaf node
+        auto keyIt = std::find(current->keys.begin(), current->keys.end(), key);
+        if (keyIt != current->keys.end())
         {
-            // Key found: Start with the value in the leaf node
-            size_t index = std::distance(current->keys.begin(), it);
+            size_t index = std::distance(current->keys.begin(), keyIt);
             value = current->values[index];
         }
         else
         {
-            // Key not found in the leaf; check for an Insert message
-            bool keyInserted = false;
-
-            if (!collectedMessages.empty())
+            if (bufferedMessage.has_value())
             {
-                for (auto messageIt = collectedMessages.rbegin(); messageIt != collectedMessages.rend(); ++messageIt)
+                auto [op, _, val] = bufferedMessage.value();
+                if (op == Operations::Insert)
                 {
-                    Operations opType = std::get<0>(*messageIt);
-                    ValueType messageValue = std::get<2>(*messageIt);
-
-                    if (opType == Operations::Insert)
-                    {
-                        value = messageValue; // Use the value from the Insert message
-                        keyInserted = true;
-                        break;
-                    }
-                    if (opType == Operations::Delete)
-                    {
-                        return ErrorCode::KeyDoesNotExist; // Key was deleted
-                    }
+                    value = val;
+                    return ErrorCode::Success;
+                }
+                else if (op == Operations::Delete)
+                {
+                    return ErrorCode::KeyDoesNotExist;
                 }
             }
-
-            if (!keyInserted)
+            else
             {
-                return ErrorCode::KeyDoesNotExist; // Key does not exist
+                return ErrorCode::KeyDoesNotExist;
             }
         }
 
-        // Apply any remaining messages in reverse order
-        for (auto messageIt = collectedMessages.rbegin(); messageIt != collectedMessages.rend(); ++messageIt)
+        // Apply Update if exists
+        if (bufferedMessage.has_value())
         {
-            Operations opType = std::get<0>(*messageIt);
-            ValueType messageValue = std::get<2>(*messageIt);
-
-            if (opType == Operations::Delete)
+            auto [op, _, val] = bufferedMessage.value();
+            if (op == Operations::Update)
             {
-                return ErrorCode::KeyDoesNotExist; // Key was deleted
+                value = val;
             }
-            if (opType == Operations::Update)
+            else if (op == Operations::Delete)
             {
-                value = messageValue; // Apply the update
+                return ErrorCode::KeyDoesNotExist;
             }
         }
 
         return ErrorCode::Success;
     }
+
 
 
     // Range query for keys in the range [low, high]
@@ -619,96 +571,84 @@ public:
         // Traverse to the first relevant leaf node
         while (!current->isLeaf)
         {
-            // Process the buffer of the current node
-            for (const auto& message : current->buffer)
-            {
-                KeyType bufferedKey = std::get<1>(message);
-                if (bufferedKey >= low && bufferedKey <= high)
-                {
-                    Operations opType = std::get<0>(message);
-                    ValueType bufferedValue = std::get<2>(message);
-
-                    if (opType == Operations::Insert)
-                    {
-                        result.emplace_back(bufferedKey, bufferedValue);
-                    }
-                    else if (opType == Operations::Delete)
-                    {
-                        auto it = std::remove_if(result.begin(), result.end(),
-                            [bufferedKey](const std::pair<KeyType, ValueType>& pair) {
-                                return pair.first == bufferedKey;
-                            });
-                        result.erase(it, result.end());
-                    }
-                }
-            }
-
             size_t i = std::upper_bound(current->keys.begin(), current->keys.end(), low) - current->keys.begin();
-            if (i >= current->children.size())
-            {
-                break;
-            }
-
+            if (i >= current->children.size()) break;
             current = current->children[i];
         }
 
-        // Collect keys from relevant leaf nodes
-        while (true)
+        // Traverse leaf nodes & collect values in range
+        while (current)
         {
-            // Collect keys in the range
             for (size_t i = 0; i < current->keys.size(); ++i)
             {
-                if (current->keys[i] >= low && current->keys[i] <= high)
+                KeyType k = current->keys[i];
+                if (k > high) goto Done;
+                if (k >= low)
                 {
-                    result.emplace_back(current->keys[i], current->values[i]);
-                }
-                else if (current->keys[i] > high)
-                {
-                    return result;
+                    result.emplace_back(k, current->values[i]);
                 }
             }
 
-            // Find the next leaf node using parent-child relationship
+            // Move to next leaf
             std::shared_ptr<Node<KeyType, ValueType>> parent = findParent(root, current);
             while (parent)
             {
                 size_t index = std::find(parent->children.begin(), parent->children.end(), current) - parent->children.begin();
-
-                // Check if there's a sibling to the right
                 if (index + 1 < parent->children.size())
                 {
                     current = parent->children[index + 1];
-
-                    // Descend to the leftmost child of the sibling
-                    while (!current->isLeaf)
-                    {
-                        current = current->children[0];
-                    }
+                    while (!current->isLeaf) current = current->children[0];
                     break;
                 }
                 else
                 {
-                    // Move up to the parent's parent
                     current = parent;
                     parent = findParent(root, parent);
                 }
             }
 
-            if (!parent)
+            if (!parent) break;
+        }
+
+    Done:
+        // Overlay centralized buffer
+        for (const auto& [key, msg] : sharedBuffer)
+        {
+            if (key < low || key > high) continue;
+
+            auto [op, _, val] = msg;
+
+            if (op == Operations::Insert || op == Operations::Update)
             {
-                break;
+                // Replace if exists
+                auto it = std::find_if(result.begin(), result.end(),
+                    [key](const auto& p) { return p.first == key; });
+
+                if (it != result.end())
+                    it->second = val;  // Update existing
+                else
+                    result.emplace_back(key, val);  // New entry
+            }
+            else if (op == Operations::Delete)
+            {
+                // Remove if exists
+                auto it = std::remove_if(result.begin(), result.end(),
+                    [key](const auto& p) { return p.first == key; });
+                result.erase(it, result.end());
             }
         }
-        // Sort and remove duplicates
+
+        // Sort and deduplicate
         std::sort(result.begin(), result.end());
         result.erase(std::unique(result.begin(), result.end(),
-            [](const std::pair<KeyType, ValueType>& a, const std::pair<KeyType, ValueType>& b) {
+            [](const auto& a, const auto& b) {
                 return a.first == b.first;
             }),
             result.end());
 
         return result;
     }
+
 
 
     // Insert a key-value pair into the tree
@@ -738,16 +678,6 @@ public:
             if (result != ErrorCode::Success)
             {
                 return result;
-            }
-
-            // Flush the buffer if necessary
-            if (current->buffer.size() >= bufferSize)
-            {
-                ErrorCode result = flushBuffer(current);
-                if (result != ErrorCode::Success)
-                {
-                    return result;
-                }
             }
 
             maybeCheckpoint();
@@ -789,208 +719,105 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode insertBuffered(std::shared_ptr<Node<KeyType, ValueType>> node, Operations operation, KeyType key, ValueType value)
     {
-        auto it = std::find_if(node->buffer.begin(), node->buffer.end(),
-            [key](const tuple<Operations, KeyType, ValueType>& op) {
-                return std::get<1>(op) == key;
-            });
+        sharedBuffer[key] = std::make_tuple(operation, key, value);
 
-        if (it != node->buffer.end())
-        {
-            Operations opType = std::get<0>(*it);
+        // === Add to node a keys map ===
+        nodeMessageMap[node].push_back(key);
 
-            switch (operation)
-            {
-            case Operations::Insert:
-                if (opType == Operations::Insert)
-                {
-                    // Replace the last insert with the new one
-                    *it = { Operations::Insert, key, value };
-                }
-                else if (opType == Operations::Delete)
-                {
-                    // Ignore the new insert
-                    return ErrorCode::Success;
-                }
-                else if (opType == Operations::Update)
-                {
-                    // Replace Update with Insert
-                    *it = { Operations::Insert, key, value };
-                }
-                break;
-            case Operations::Delete:
-                if (opType == Operations::Insert || opType == Operations::Update)
-                {
-                    // Remove the Insert operation and add Delete
-                    *it = { Operations::Delete, key, ValueType{} };
-                }
-                else if (opType == Operations::Delete) {
-                    // Do nothing, as Delete already exists
-                    return ErrorCode::Success;
-                }
-                break;
-            case Operations::Update:
-                if (opType == Operations::Insert || opType == Operations::Update)
-                {
-                    *it = { Operations::Update, key, value }; // Replace Insert/Update with Update
-                }
-                else if (opType == Operations::Delete)
-                {
-                    return ErrorCode::Error; // Can't Update after Delete
-                }
-                break;
-            default:
-                return ErrorCode::Error;
-            }
-
-        }
-        else
-        {
-            node->buffer.emplace_back(operation, key, value);
-        }
+        // === Add to key a node map ===
+        messageToNodeMap[key] = node;
 
         return ErrorCode::Success;
     }
 
 
-    // Flush the buffer of an Internal node
     template <typename KeyType, typename ValueType>
     ErrorCode flushBuffer(std::shared_ptr<Node<KeyType, ValueType>> node)
     {
-        if (node->isLeaf || node->buffer.empty()) return ErrorCode::Success;
-        auto bufferCopy = node->buffer;
-        node->buffer.clear();
+        if (node->isLeaf) return ErrorCode::Success;
 
-        for (auto& operation : bufferCopy)
+        auto it = nodeMessageMap.find(node);
+        if (it == nodeMessageMap.end()) return ErrorCode::Success;
+
+        std::vector<KeyType>& keys = it->second;
+
+        for (KeyType key : keys)
         {
-            Operations opType = std::get<0>(operation); // Operation type
-            KeyType key = std::get<1>(operation);          // Key
-            ValueType value = std::get<2>(operation);        // Value
+            auto msgIt = sharedBuffer.find(key);
+            if (msgIt == sharedBuffer.end()) continue;
 
-            // Find the appropriate child
-            size_t i = std::upper_bound(node->keys.begin(), node->keys.end(), key) - node->keys.begin();
-            if (i >= node->children.size()) return ErrorCode::Error;
+            auto [opType, k, v] = msgIt->second;
 
-            std::shared_ptr<Node<KeyType, ValueType>> child = node->children[i];
+            size_t i = std::upper_bound(node->keys.begin(), node->keys.end(), k) - node->keys.begin();
+            if (i >= node->children.size()) continue;
 
-            switch (opType)
+            auto child = node->children[i];
+
+            if (!child->isLeaf)
             {
-            case Operations::Insert:
-                if (!child->isLeaf)
-                {
-                    // Propagate insert to the child buffer
-                    propagateToBuffer(child, Operations::Insert, key, value);
-                }
-                else
-                {
-                    // Insert directly into the leaf
-                    auto it_keys = lower_bound(child->keys.begin(), child->keys.end(), key);
-                    auto it_values = lower_bound(child->values.begin(), child->values.end(), value);
-
-                    child->keys.insert(it_keys, key);
-                    child->values.insert(it_values, value);
-                    sort(child->values.begin(), child->values.end());
-
-
-                    // Split leaf if necessary
-                    if (child->keys.size() >= m_nDegree)
-                    {
-                        ErrorCode result = splitLeaf(node, child);
-                        if (result != ErrorCode::Success) return result;
-                        node = findParent(root, child);
-                        //node = root;
-                    }
-
-                    /*if (child->keys.size() >= m_nDegree) {
-                        Node<KeyType, ValueType>* parent = findParent(root, child);
-                        ErrorCode result = splitLeaf(parent, child);
-                        if (result != ErrorCode::Success) {
-                            return result;
-                        }
-                        //node = findParent(root, child);
-                    }*/
-
-
-                }
-                break;
-            case Operations::Delete:
-                if (!child->isLeaf)
-                {
-                    // Propagate delete to the child buffer
-                    propagateToBuffer(child, Operations::Delete, key, ValueType{});
-                }
-                else
-                {
-                    // Remove directly from the leaf
-                    auto it = std::find(child->keys.begin(), child->keys.end(), key);
-                    if (it != child->keys.end())
-                    {
-                        size_t index = std::distance(child->keys.begin(), it);
-                        child->keys.erase(it);
-                        child->values.erase(child->values.begin() + index);
-
-                        // Handle underflow if necessary
-                        if (child->keys.size() < (m_nDegree / 2))
-                        {
-                            ErrorCode result = handleUnderflow(node, child);
-                            if (result != ErrorCode::Success) return result;
-                        }
-                    }
-                }
-                /*if (!child->isLeaf) {
-                    propagateToBuffer(child, Operations::Delete, key, 0);
-                }
-                else {
-                    auto it = std::find(child->keys.begin(), child->keys.end(), key);
-                    if (it != child->keys.end()) {
-                        size_t index = std::distance(child->keys.begin(), it);
-                        child->keys.erase(it);
-                        child->values.erase(child->values.begin() + index);
-
-                        // Handle underflow
-                        if (child->keys.size() < (m_nDegree + 1) / 2) {
-                            ErrorCode result = handleUnderflow(child, node);
-                            if (result != ErrorCode::Success) return result;
-                        }
-                    }
-                }*/
-                break;
-
-            case Operations::Update:
-                if (!child->isLeaf)
-                {
-                    propagateToBuffer(child, Operations::Update, key, value);
-                }
-                else
-                {
-                    auto it = std::find(child->keys.begin(), child->keys.end(), key);
-                    if (it != child->keys.end())
-                    {
-                        size_t index = std::distance(child->keys.begin(), it);
-                        child->values[index] = value; // Update value
-                    }
-                }
-                break;
-            default:
-                return ErrorCode::Error;
+                // Re-buffer into child node (still centralized)
+                insertBuffered(child, opType, k, v);
             }
+            else
+            {
+                // Directly apply to leaf node
+                auto keyIt = std::find(child->keys.begin(), child->keys.end(), k);
+
+                switch (opType)
+                {
+                case Operations::Insert:
+                    if (keyIt == child->keys.end())
+                    {
+                        auto insertPos = std::lower_bound(child->keys.begin(), child->keys.end(), k);
+                        size_t index = std::distance(child->keys.begin(), insertPos);
+                        child->keys.insert(insertPos, k);
+                        child->values.insert(child->values.begin() + index, v);
+                        if (child->keys.size() >= m_nDegree) {
+                            ErrorCode result = splitLeaf(node, child);  // node is the parent
+                            if (result != ErrorCode::Success) return result;
+                        }
+                    }
+                    break;
+
+                case Operations::Update:
+                    if (keyIt != child->keys.end())
+                    {
+                        size_t index = std::distance(child->keys.begin(), keyIt);
+                        child->values[index] = v;
+                    }
+                    break;
+
+                case Operations::Delete:
+                    if (keyIt != child->keys.end())
+                    {
+                        size_t index = std::distance(child->keys.begin(), keyIt);
+                        child->keys.erase(child->keys.begin() + index);
+                        child->values.erase(child->values.begin() + index);
+                    }
+                    break;
+
+                default:
+                    return ErrorCode::Error;
+                }
+            }
+
+            sharedBuffer.erase(msgIt);  // clean up
+            messageToNodeMap.erase(key);
         }
 
-        //node->buffer.clear();
+        nodeMessageMap.erase(it);  // clean up
         return ErrorCode::Success;
     }
+
 
 
     // propagate an operation to the buffer of a child node
     template <typename KeyType, typename ValueType>
     ErrorCode propagateToBuffer(std::shared_ptr<Node<KeyType, ValueType>> child, Operations opType, KeyType key, ValueType value)
     {
-        child->buffer.emplace_back(opType, key, value);
-        if (child->buffer.size() >= bufferSize)
-        {
-            return flushBuffer(child); // Flush child buffer if full
-        }
-        return ErrorCode::Success;
+        return insertBuffered(child, opType, key, value);
     }
+
 
 
     // split a leaf node
@@ -1130,42 +957,74 @@ public:
             }
         }
         cout << "]";
-        if (!node->isLeaf)
-        {
-            cout << " (buffer: ";
-            // Print the operations in the buffer
-            for (auto& op : node->buffer)
-            {
-                Operations opType = std::get<0>(op); // Operation type
-                KeyType key = std::get<1>(op);          // Key
-                ValueType value = std::get<2>(op);        // Value
-
-                // Determine the operation type and display it
-                switch (opType)
-                {
-                case Operations::Insert:
-                    cout << "INSERT(" << key << ":" << value << ") ";
-                    break;
-                case Operations::Delete:
-                    cout << "DELETE(" << key << ") ";
-                    break;
-                case Operations::Update:
-                    cout << "UPDATE(" << key << ":" << value << ") ";
-                    break;
-                default:
-                    cout << "UNKNOWN(" << key << ":" << value << ") ";
-                    break;
-                }
-            }
-            cout << ")";
-        }
-
         cout << endl;
 
         // Recursively display child nodes
         for (std::shared_ptr<Node<KeyType, ValueType>> child : node->children)
         {
             display(child, level + 1);
+        }
+    }
+
+    // template <typename KeyType, typename ValueType>
+    void printSharedBuffer() const {
+        std::cout << "\n--- [DEBUG] Shared Buffer Contents ---\n";
+        if (sharedBuffer.empty()) {
+            std::cout << "(empty)\n";
+            return;
+        }
+
+        for (const auto& [key, message] : sharedBuffer)
+        {
+            Operations opType = std::get<0>(message);
+            int k = std::get<1>(message);
+            int v = std::get<2>(message);
+
+            switch (opType)
+            {
+            case Operations::Insert:
+                std::cout << "INSERT(" << k << " : " << v << ")\n";
+                break;
+            case Operations::Update:
+                std::cout << "UPDATE(" << k << " : " << v << ")\n";
+                break;
+            case Operations::Delete:
+                std::cout << "DELETE(" << k << ")\n";
+                break;
+            default:
+                std::cout << "UNKNOWN(" << k << ")\n";
+            }
+        }
+    }
+
+    // template <typename KeyType, typename ValueType>
+    void printNodeMessageMap() const {
+        std::cout << "\n--- [DEBUG] nodeMessageMap Contents ---\n";
+        if (nodeMessageMap.empty()) {
+            std::cout << "(empty)\n";
+            return;
+        }
+
+        int nodeId = 0;
+        for (const auto& [node, keys] : nodeMessageMap) {
+            std::cout << "Node[" << nodeId++ << "] has messages for keys: ";
+            for (const KeyType& key : keys) {
+                std::cout << key << " ";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // template <typename KeyType, typename ValueType>
+    void printMessageToNodeMap() const {
+        std::cout << "\n--- [DEBUG] messageToNodeMap Contents ---\n";
+        if (messageToNodeMap.empty()) {
+            std::cout << "(empty)\n";
+            return;
+        }
+
+        for (const auto& [key, node] : messageToNodeMap) {
+            std::cout << "Key " << key << " belongs to Node" << node.get() << "\n";
         }
     }
 
@@ -1183,52 +1042,6 @@ public:
             if (parent) return parent;
         }
         return nullptr;
-    }
-
-
-    // check if a tree is balanced
-    template <typename KeyType, typename ValueType>
-    bool isBalanced(std::shared_ptr<Node<KeyType, ValueType>> node, int depth, int& leafDepth)
-    {
-        if (!node) return true; // Empty tree is balanced
-
-        // Check if it's a leaf node
-        if (node->isLeaf)
-        {
-            if (leafDepth == -1)
-            {
-                leafDepth = depth; // Set depth for the first leaf
-            }
-            return depth == leafDepth; // All leaves must have the same depth
-        }
-
-
-
-        // Check buffer size for internal nodes
-        if (!node->isLeaf && node->buffer.size() > bufferSize) return false;
-
-        // Recursively check all children
-        for (size_t i = 0; i < node->children.size(); ++i)
-        {
-            if (!isBalanced(node->children[i], depth + 1, leafDepth))
-            {
-                return false;
-            }
-
-            // Validate key ranges between parent and child
-            if (i > 0 && node->children[i - 1]->keys.back() >= node->keys[i - 1]) return false;
-        }
-
-        return true;
-    }
-
-
-    // call isTreeBalanced
-    template <typename KeyType, typename ValueType>
-    bool isTreeBalanced()
-    {
-        int leafDepth = -1; // Depth of the first encountered leaf
-        return isBalanced(root, 0, leafDepth);
     }
 
 
@@ -1257,16 +1070,6 @@ public:
             if (result != ErrorCode::Success)
             {
                 return result;
-            }
-
-            // Flush the buffer if necessary
-            if (current->buffer.size() >= bufferSize)
-            {
-                ErrorCode result = flushBuffer(current);
-                if (result != ErrorCode::Success)
-                {
-                    return result;
-                }
             }
 
             maybeCheckpoint();
