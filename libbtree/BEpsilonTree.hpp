@@ -30,6 +30,7 @@ class BEpsilonTree
 public:
     std::shared_ptr<Node<KeyType, ValueType>> root;
     uint32_t m_nDegree;
+    uint32_t maxBufferSize;
     std::string logFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_test1.log";
     int opCounter = 0;
     int checkpointFrequency = 5;
@@ -39,13 +40,14 @@ public:
     std::unordered_map<KeyType, std::tuple<Operations, KeyType, ValueType>> sharedBuffer;
     std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
     std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
+    std::unordered_map<KeyType, int> nodeFrequency;
 
 
 
-
-    BEpsilonTree(int m_nDegree, const std::string& filename, int checkpointFrequency = -1)
+    BEpsilonTree(int m_nDegree, int maxBufferSize, const std::string& filename, int checkpointFrequency = -1)
     {
         this->m_nDegree = m_nDegree;
+        this->maxBufferSize = maxBufferSize;
         if (checkpointFrequency > 0)
             this->checkpointFrequency = checkpointFrequency;
 
@@ -102,7 +104,7 @@ public:
         walBin.close();
         isReplaying = false;
         //flushBuffer(root);
-        
+
     }
 
     ~BEpsilonTree()
@@ -115,7 +117,7 @@ public:
 
         // === Backup and clear binary WAL ===
         const std::string binWal = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal";
-        const std::string bakName = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_bin_backup" + timestampename() +  ".bak";
+        const std::string bakName = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_bin_backup" + timestampename() + ".bak";
 
         std::ifstream src(binWal, std::ios::binary);
         std::ofstream dst(bakName, std::ios::binary);
@@ -132,19 +134,19 @@ public:
 
 private:
 
-	std::string timestampename() {
-		const auto now = std::chrono::system_clock::now();
-		const auto time = std::chrono::system_clock::to_time_t(now);
-		std::tm utcTime;
-		gmtime_s(&utcTime, &time);
-		std::stringstream timestamp;
-		timestamp << std::put_time(&utcTime, "%Y-%m-%d_%H-%M-%S");
-		return timestamp.str();
-	}
+    std::string timestampename() {
+        const auto now = std::chrono::system_clock::now();
+        const auto time = std::chrono::system_clock::to_time_t(now);
+        std::tm utcTime;
+        gmtime_s(&utcTime, &time);
+        std::stringstream timestamp;
+        timestamp << std::put_time(&utcTime, "%Y-%m-%d_%H-%M-%S");
+        return timestamp.str();
+    }
 
     void checkpoint() {
         // Save tree to disk
-        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");       
+        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
 
         std::string backupFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_backup" + timestampename() + ".bak";
 
@@ -320,6 +322,10 @@ private:
         return root;
     }
 
+    KeyType getNodeKey(const std::shared_ptr<Node<KeyType, ValueType>>& node) {
+        return (!node->keys.empty()) ? node->keys[0] : KeyType{};
+    }
+
 
 public:
     // Remove a key from the tree
@@ -434,28 +440,58 @@ public:
 
     // Merge two nodes
     template <typename KeyType, typename ValueType>
-    void mergeNodes(std::shared_ptr<Node<KeyType, ValueType>> parent, std::shared_ptr<Node<KeyType, ValueType>> left, std::shared_ptr<Node<KeyType, ValueType>> right, size_t separatorIndex)
+    void mergeNodes(std::shared_ptr<Node<KeyType, ValueType>> parent,
+        std::shared_ptr<Node<KeyType, ValueType>> left,
+        std::shared_ptr<Node<KeyType, ValueType>> right,
+        size_t separatorIndex)
     {
-        // Move the separator key from the parent to the left node
-        left->keys.push_back(parent->keys[separatorIndex]);
-        //left->keys.insert(left->keys.end(), right->keys.begin(), right->keys.end());
-        //left->values.insert(left->values.end(), right->values.begin(), right->values.end());
+        if (!left || !right || !parent) return;
 
-        //if (!right->keys.size() == 1)
-        if (right->keys.size() != 1)
-        {
-            // Append all keys and values from the right sibling into the left sibling
-            left->keys.insert(left->keys.end(), right->keys.begin(), right->keys.end());
-
+        if (separatorIndex >= parent->keys.size()) {
+            std::cerr << "[ERROR] Invalid separatorIndex in merge.\n";
+            return;
         }
-        left->values.insert(left->values.end(), right->values.begin(), right->values.end());
-        // Remove the separator key from the parent
-        parent->keys.erase(parent->keys.begin() + separatorIndex);
-        parent->children.erase(parent->children.begin() + separatorIndex + 1);
 
-        //delete right;
+        if (right->keys.empty() && left->keys.empty()) {
+            std::cerr << "[WARN] Both nodes empty. Nothing to merge.\n";
+            return;
+        }
+
+        // Safe to access separator key
+        if (!left->isLeaf)
+            left->keys.push_back(parent->keys[separatorIndex]);
+
+        // Merge keys/values if available
+        left->keys.insert(left->keys.end(), right->keys.begin(), right->keys.end());
+        left->values.insert(left->values.end(), right->values.begin(), right->values.end());
+
+        // Merge children if internal node
+        if (!left->isLeaf && !right->isLeaf) {
+            left->children.insert(left->children.end(), right->children.begin(), right->children.end());
+        }
+
+        // Clean up parent
+        if (separatorIndex < parent->keys.size())
+            parent->keys.erase(parent->keys.begin() + separatorIndex);
+
+        if ((separatorIndex + 1) < parent->children.size())
+            parent->children.erase(parent->children.begin() + separatorIndex + 1);
+
+        // Reassign messages
+        auto it = nodeMessageMap.find(right);
+        if (it != nodeMessageMap.end()) {
+            for (auto& k : it->second) {
+                nodeMessageMap[left].push_back(k);
+                messageToNodeMap[k] = left;
+            }
+            nodeMessageMap.erase(it);
+        }
+
         right.reset();
     }
+
+
+
 
 
     // Update the value of a specific key in the tree
@@ -717,98 +753,215 @@ public:
 
     // Insert an operation to the buffer of an Internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode insertBuffered(std::shared_ptr<Node<KeyType, ValueType>> node, Operations operation, KeyType key, ValueType value)
+    ErrorCode insertBuffered(std::shared_ptr<Node<KeyType, ValueType>> node, Operations op, KeyType key, ValueType value)
     {
-        sharedBuffer[key] = std::make_tuple(operation, key, value);
+        if (sharedBuffer.size() >= maxBufferSize) {
+            ErrorCode result = flushLFUNode();
+            if (result != ErrorCode::Success) return result;
+        }
 
-        // === Add to node a keys map ===
+        auto it = sharedBuffer.find(key);
+
+        if (it != sharedBuffer.end()) {
+            auto [prevOp, _, prevVal] = it->second;
+
+            // === Coalescing Rules ===
+
+            // INSERT - UPDATE => Merge into INSERT
+            if (prevOp == Operations::Insert && op == Operations::Update) {
+                sharedBuffer[key] = { Operations::Insert, key, value };
+            }
+            // INSERT - DELETE => Cancel the insert (net zero)
+            else if (prevOp == Operations::Insert && op == Operations::Delete) {
+                sharedBuffer.erase(it);
+                messageToNodeMap.erase(key);
+                auto& keyList = nodeMessageMap[node];
+                keyList.erase(std::remove(keyList.begin(), keyList.end(), key), keyList.end());
+                return ErrorCode::Success;
+            }
+            // UPDATE - DELETE => Keep only DELETE
+            else if (prevOp == Operations::Update && op == Operations::Delete) {
+                sharedBuffer[key] = { Operations::Delete, key, ValueType{} };
+            }
+            // UPDATE - UPDATE => Keep most recent update
+            else if (prevOp == Operations::Update && op == Operations::Update) {
+                sharedBuffer[key] = { Operations::Update, key, value };
+            }
+            // DELETE - INSERT => Transform into UPSERT (Insert)
+            else if (prevOp == Operations::Delete && op == Operations::Insert) {
+                sharedBuffer[key] = { Operations::Insert, key, value };
+            }
+            // Otherwise: overwrite
+            else {
+                sharedBuffer[key] = { op, key, value };
+            }
+        }
+        sharedBuffer[key] = { op, key, value };
         nodeMessageMap[node].push_back(key);
-
-        // === Add to key a node map ===
         messageToNodeMap[key] = node;
+
+        KeyType nodeKey = getNodeKey(node);
+        nodeFrequency[nodeKey]++;
 
         return ErrorCode::Success;
     }
+
+    ErrorCode flushLFUNode()
+    {
+        if (nodeMessageMap.empty()) return ErrorCode::Success;
+
+        // Step 1: Get the least frequently used nodeKey
+        auto minIt = std::min_element(
+            nodeFrequency.begin(), nodeFrequency.end(),
+            [](const auto& a, const auto& b) {
+                return a.second < b.second;
+            });
+
+        if (minIt == nodeFrequency.end()) return ErrorCode::Error;
+
+        KeyType lfuKey = minIt->first;
+
+        // Step 2: Find the node in nodeMessageMap with that key
+        auto nodeIt = std::find_if(nodeMessageMap.begin(), nodeMessageMap.end(),
+            [&](const auto& pair) {
+                return !pair.first->keys.empty() && pair.first->keys[0] == lfuKey;
+            });
+
+        if (nodeIt == nodeMessageMap.end()) return ErrorCode::Error;
+
+        auto nodeToFlush = nodeIt->first;
+
+        // Step 3: Flush and clean up
+        ErrorCode result = flushBuffer(nodeToFlush);
+        if (result == ErrorCode::Success) {
+            nodeFrequency.erase(lfuKey);
+        }
+
+        return result;
+    }
+
 
 
     template <typename KeyType, typename ValueType>
     ErrorCode flushBuffer(std::shared_ptr<Node<KeyType, ValueType>> node)
     {
-        if (node->isLeaf) return ErrorCode::Success;
+        // 1) If it's a leaf, there's no "buffer" to flush downward
+        if (node->isLeaf)
+            return ErrorCode::Success;
 
+        // 2) Check if this node actually has any messages in nodeMessageMap
         auto it = nodeMessageMap.find(node);
-        if (it == nodeMessageMap.end()) return ErrorCode::Success;
+        if (it == nodeMessageMap.end()) {
+            // No messages for this node
+            return ErrorCode::Success;
+        }
 
-        std::vector<KeyType>& keys = it->second;
+        // 3) Copy the list of keys we need to flush, then remove the mapping entry
+        std::vector<KeyType> keysCopy = it->second;
+        nodeMessageMap.erase(it);
 
-        for (KeyType key : keys)
+        // 4) For each key in keysCopy, find the message in sharedBuffer and flush it
+        for (KeyType key : keysCopy)
         {
             auto msgIt = sharedBuffer.find(key);
-            if (msgIt == sharedBuffer.end()) continue;
-
-            auto [opType, k, v] = msgIt->second;
-
-            size_t i = std::upper_bound(node->keys.begin(), node->keys.end(), k) - node->keys.begin();
-            if (i >= node->children.size()) continue;
-
-            auto child = node->children[i];
-
-            if (!child->isLeaf)
-            {
-                // Re-buffer into child node (still centralized)
-                insertBuffered(child, opType, k, v);
+            if (msgIt == sharedBuffer.end()) {
+                // Possibly it got coalesced away or re-labeled; skip
+                continue;
             }
-            else
-            {
-                // Directly apply to leaf node
-                auto keyIt = std::find(child->keys.begin(), child->keys.end(), k);
 
+            // Extract the operation info
+            auto [opType, msgKey, msgValue] = msgIt->second;
+
+            // Determine which child node should handle this key
+            size_t i = std::upper_bound(node->keys.begin(), node->keys.end(), msgKey)
+                - node->keys.begin();
+            if (i >= node->children.size()) {
+                // Key is out of range? Possibly an edge case
+                continue;
+            }
+
+            std::shared_ptr<Node<KeyType, ValueType>> child = node->children[i];
+
+            // 5) If the child is also an internal node, re-insert this message for the child
+            //    If the child is a leaf, physically apply the operation
+            if (!child->isLeaf) {
+                // Re-label the message so it belongs to the child
+                // This call adds (opType, msgKey, msgValue) to child's portion of the global buffer
+                ErrorCode result = insertBuffered(child, opType, msgKey, msgValue);
+                if (result != ErrorCode::Success) {
+                    // If an error, you might want to handle or log it
+                    return result;
+                }
+            }
+            else {
+                // Child is a leaf => apply the operation directly
                 switch (opType)
                 {
                 case Operations::Insert:
-                    if (keyIt == child->keys.end())
-                    {
-                        auto insertPos = std::lower_bound(child->keys.begin(), child->keys.end(), k);
-                        size_t index = std::distance(child->keys.begin(), insertPos);
-                        child->keys.insert(insertPos, k);
-                        child->values.insert(child->values.begin() + index, v);
-                        if (child->keys.size() >= m_nDegree) {
-                            ErrorCode result = splitLeaf(node, child);  // node is the parent
-                            if (result != ErrorCode::Success) return result;
+                {
+                    // Insert msgKey/msgValue in ascending order
+                    auto it_keys = std::lower_bound(child->keys.begin(), child->keys.end(), msgKey);
+                    auto it_values = std::lower_bound(child->values.begin(), child->values.end(), msgValue);
+                    child->keys.insert(it_keys, msgKey);
+                    child->values.insert(it_values, msgValue);
+
+                    // If the leaf is overfull, do a split
+                    if (child->keys.size() >= m_nDegree) {
+                        auto parentOfChild = findParent(root, child);
+                        splitLeaf(parentOfChild, child);
+                    }
+                    break;
+                }
+                case Operations::Delete:
+                {
+                    // Remove msgKey if it exists in the child
+                    auto delIt = std::find(child->keys.begin(), child->keys.end(), msgKey);
+                    if (delIt != child->keys.end()) {
+                        size_t delIdx = std::distance(child->keys.begin(), delIt);
+                        child->keys.erase(delIt);
+                        child->values.erase(child->values.begin() + delIdx);
+
+                        // If the leaf underflows, handle it
+                        if (child->keys.size() < (m_nDegree / 2)) {
+                            auto parentOfChild = findParent(root, child);
+                            handleUnderflow(parentOfChild, child);
                         }
                     }
                     break;
-
+                }
                 case Operations::Update:
-                    if (keyIt != child->keys.end())
-                    {
-                        size_t index = std::distance(child->keys.begin(), keyIt);
-                        child->values[index] = v;
+                {
+                    // Find msgKey and update its value if present
+                    auto updIt = std::find(child->keys.begin(), child->keys.end(), msgKey);
+                    if (updIt != child->keys.end()) {
+                        size_t updIdx = std::distance(child->keys.begin(), updIt);
+                        child->values[updIdx] = msgValue;
                     }
                     break;
-
-                case Operations::Delete:
-                    if (keyIt != child->keys.end())
-                    {
-                        size_t index = std::distance(child->keys.begin(), keyIt);
-                        child->keys.erase(child->keys.begin() + index);
-                        child->values.erase(child->values.begin() + index);
-                    }
-                    break;
-
+                }
                 default:
-                    return ErrorCode::Error;
+                    // e.g. Upsert or unknown op
+                    // Could handle similarly or log a warning
+                    break;
                 }
             }
 
-            sharedBuffer.erase(msgIt);  // clean up
-            messageToNodeMap.erase(key);
+            // 6) Message cleanup logic based on NVM-awareness
+            if (child->isLeaf) {
+                // Message applied to a node outside NVM → remove from buffer
+                sharedBuffer.erase(msgIt);
+                messageToNodeMap.erase(key);
+            }
+            else {
+                // Message is still in NVM tree, only relabeled → do not erase
+                messageToNodeMap[key] = child;
+                nodeMessageMap[child].push_back(key);
+            }
+
         }
 
-        nodeMessageMap.erase(it);  // clean up
         return ErrorCode::Success;
     }
-
 
 
     // propagate an operation to the buffer of a child node
@@ -819,44 +972,71 @@ public:
     }
 
 
-
     // split a leaf node
     template <typename KeyType, typename ValueType>
-    ErrorCode splitLeaf(std::shared_ptr<Node<KeyType, ValueType>> parent, std::shared_ptr<Node<KeyType, ValueType>> leaf)
+    ErrorCode splitLeaf(std::shared_ptr<Node<KeyType, ValueType>> parent,
+        std::shared_ptr<Node<KeyType, ValueType>> leaf)
     {
+        // Step 1: Create a new sibling node
         std::shared_ptr<Node<KeyType, ValueType>> sibling = std::make_shared<Node<KeyType, ValueType>>(true);
 
-        // Determine the split point
-        int mid = leaf->keys.size() / 2;
+        // Step 2: Determine the midpoint to split
+        int mid = static_cast<int>(leaf->keys.size()) / 2;
 
-        // Split keys and values between the current leaf and the sibling
+        // Step 3: Move half of the keys/values to the sibling
         sibling->keys.assign(leaf->keys.begin() + mid, leaf->keys.end());
         sibling->values.assign(leaf->values.begin() + mid, leaf->values.end());
+
+        // Resize the original leaf to keep only the first half
         leaf->keys.resize(mid);
         leaf->values.resize(mid);
 
-        // The smallest key in the sibling becomes the pivot key
+        // Step 4: Determine the pivot key (smallest key in the sibling)
         KeyType pivotKey = sibling->keys[0];
 
+        // Step 5: Reassign buffered messages to the sibling if key >= pivotKey
+        auto it = nodeMessageMap.find(leaf);
+        if (it != nodeMessageMap.end()) {
+            std::vector<KeyType> keysToMove;
+            for (const KeyType& k : it->second) {
+                if (k >= pivotKey) {
+                    keysToMove.push_back(k);
+                }
+            }
+
+            // Move those keys to sibling and update the mappings
+            for (const KeyType& k : keysToMove) {
+                // Remove from leaf's list
+                auto& list = nodeMessageMap[leaf];
+                list.erase(std::remove(list.begin(), list.end(), k), list.end());
+
+                // Add to sibling's list
+                nodeMessageMap[sibling].push_back(k);
+
+                // Update key's responsible node
+                messageToNodeMap[k] = sibling;
+            }
+        }
+
+        // Step 6: If no parent, create a new root
         if (!parent)
         {
-            // Case: Leaf node is the root, so create a new root
             std::shared_ptr<Node<KeyType, ValueType>> newRoot = std::make_shared<Node<KeyType, ValueType>>(false);
-            newRoot->keys.push_back(pivotKey); // Promote pivot key to the root
-            newRoot->children.push_back(leaf); // Add current leaf as the left child
-            newRoot->children.push_back(sibling); // Add sibling as the right child
-            root = newRoot; // Update the root pointer
+            newRoot->keys.push_back(pivotKey);
+            newRoot->children.push_back(leaf);
+            newRoot->children.push_back(sibling);
+            root = newRoot;
         }
         else
         {
-            // Insert pivotKey into parent and add sibling
+            // Step 7: Insert pivotKey into parent and place sibling to the right of leaf
             auto it = std::lower_bound(parent->keys.begin(), parent->keys.end(), pivotKey);
             parent->keys.insert(it, pivotKey);
 
             auto childIt = std::find(parent->children.begin(), parent->children.end(), leaf);
             parent->children.insert(childIt + 1, sibling);
 
-            // Check if the parent needs to split
+            // Step 8: Check if the parent also needs to split
             if (parent->keys.size() >= m_nDegree)
             {
                 std::shared_ptr<Node<KeyType, ValueType>> grandparent = findParent(root, parent);
@@ -866,53 +1046,65 @@ public:
 
         return ErrorCode::Success;
     }
+
 
 
     // split an internal node
     template <typename KeyType, typename ValueType>
-    ErrorCode splitInternal(std::shared_ptr<Node<KeyType, ValueType>> parent, std::shared_ptr<Node<KeyType, ValueType>> internal)
+    ErrorCode splitInternal(std::shared_ptr<Node<KeyType, ValueType>> parent,
+        std::shared_ptr<Node<KeyType, ValueType>> internal)
     {
+        // Create a new sibling node
         std::shared_ptr<Node<KeyType, ValueType>> sibling = std::make_shared<Node<KeyType, ValueType>>(false);
 
         // Determine the split point
-        int mid = internal->keys.size() / 2;
+        int mid = static_cast<int>(internal->keys.size()) / 2;
 
         // The middle key becomes the pivot key
         KeyType pivotKey = internal->keys[mid];
 
-        // Split keys and children between the current internal node and the sibling
-        //sibling->keys.assign(internal->keys.begin() + mid + 1, internal->keys.end());
-        //sibling->children.assign(internal->children.begin() + mid + 1, internal->children.end());
-        //internal->keys.resize(mid); // Resize after assigning sibling keys
-        //internal->children.resize(mid + 1); // Resize after assigning sibling children
-
+        // Move keys and children from 'internal' to 'sibling'
         sibling->keys.assign(internal->keys.begin() + mid + 1, internal->keys.end());
         sibling->children.assign(internal->children.begin() + mid + 1, internal->children.end());
 
-        internal->keys.resize(mid); // Keep keys up to the split point
-        internal->children.resize(mid + 1); // Keep children up to the split point
+        // Resize the old internal node
+        internal->keys.resize(mid);
+        internal->children.resize(mid + 1);
 
-
+        // If there is no parent, then the 'internal' node was the root
         if (!parent)
         {
-            // Handle root split
-            return handleRootSplit(internal, sibling, pivotKey);
+            // Create a new root
+            std::shared_ptr<Node<KeyType, ValueType>> newRoot = std::make_shared<Node<KeyType, ValueType>>(false);
+
+            // Promote the pivot key into the new root
+            newRoot->keys.push_back(pivotKey);
+
+            // The old internal node becomes the left child
+            newRoot->children.push_back(internal);
+
+            // The sibling becomes the right child
+            newRoot->children.push_back(sibling);
+
+            // Update root
+            root = newRoot;
         }
         else
         {
-            // Promote the pivot key to the parent
+            // Insert 'pivotKey' into the parent
             auto it = std::lower_bound(parent->keys.begin(), parent->keys.end(), pivotKey);
             parent->keys.insert(it, pivotKey);
 
-            // Add the sibling to the parent's children
+            // Link the sibling to the parent, just after 'internal'
             auto childIt = std::find(parent->children.begin(), parent->children.end(), internal);
             if (childIt == parent->children.end())
             {
-                return ErrorCode::Error; // Parent-child relationship broken
+                // Parent-child relationship broken (unlikely but check anyway)
+                return ErrorCode::Error;
             }
             parent->children.insert(childIt + 1, sibling);
 
-            // Check if the parent needs to split
+            // Check if the parent also needs to split
             if (parent->keys.size() >= m_nDegree)
             {
                 std::shared_ptr<Node<KeyType, ValueType>> grandparent = findParent(root, parent);
@@ -920,8 +1112,44 @@ public:
             }
         }
 
+        //
+        // *** Message reassignment step ***
+        //
+        // All keys in nodeMessageMap[internal] that are >= pivotKey
+        // now belong to the sibling, because those keys logically
+        // fall in the sibling’s range.
+        //
+        {
+            auto& oldList = nodeMessageMap[internal];  // keys currently mapped to 'internal'
+            std::vector<KeyType> keysMoving;
+
+            // Identify which keys belong to sibling
+            for (const KeyType& k : oldList)
+            {
+                if (k >= pivotKey)
+                {
+                    keysMoving.push_back(k);
+                }
+            }
+
+            // Move them to sibling
+            for (const KeyType& k : keysMoving)
+            {
+                // Remove from old node's vector
+                auto& listRef = nodeMessageMap[internal];
+                listRef.erase(std::remove(listRef.begin(), listRef.end(), k), listRef.end());
+
+                // Add to sibling's vector
+                nodeMessageMap[sibling].push_back(k);
+
+                // Update messageToNodeMap so that k points to sibling
+                messageToNodeMap[k] = sibling;
+            }
+        }
+
         return ErrorCode::Success;
     }
+
 
 
     // Handle root split
@@ -1005,15 +1233,22 @@ public:
             return;
         }
 
-        int nodeId = 0;
         for (const auto& [node, keys] : nodeMessageMap) {
-            std::cout << "Node[" << nodeId++ << "] has messages for keys: ";
+            // Print internal node keys
+            std::cout << "Node ";
+            for (const auto& k : node->keys) {
+                std::cout << k << " ";
+            }
+            std::cout << "has messages for Nodes: ";
+
+            // Print buffered keys for this node
             for (const KeyType& key : keys) {
                 std::cout << key << " ";
             }
             std::cout << "\n";
         }
     }
+
 
     // template <typename KeyType, typename ValueType>
     void printMessageToNodeMap() const {
@@ -1027,6 +1262,20 @@ public:
             std::cout << "Key " << key << " belongs to Node" << node.get() << "\n";
         }
     }
+
+
+    void printNodeFrequency() const {
+        std::cout << "\n--- [DEBUG] Node Frequency ---\n";
+        if (nodeFrequency.empty()) {
+            std::cout << "(empty)\n";
+            return;
+        }
+
+        for (const auto& [key, freq] : nodeFrequency) {
+            std::cout << "Node[" << key << "] -> freq = " << freq << "\n";
+        }
+    }
+
 
 
     // find the parent of a child node
