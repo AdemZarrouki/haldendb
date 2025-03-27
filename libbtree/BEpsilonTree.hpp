@@ -36,12 +36,16 @@ public:
     int checkpointFrequency = 5;
     bool isReplaying = false;
 
-    // shared buffer as the design
+    // shared buffer
     std::unordered_map<KeyType, std::tuple<Operations, KeyType, ValueType>> sharedBuffer;
     std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
     std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
     std::unordered_map<KeyType, int> nodeFrequency;
 
+    // DRAM read buffer
+    std::unordered_map<KeyType, ValueType> readCache;
+    std::list<KeyType> lruList;
+    size_t maxReadCacheSize = 100;  // to be set
 
 
     BEpsilonTree(int m_nDegree, int maxBufferSize, const std::string& filename, int checkpointFrequency = -1)
@@ -107,6 +111,7 @@ public:
 
     }
 
+
     ~BEpsilonTree()
     {
         saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
@@ -133,6 +138,27 @@ public:
     }
 
 private:
+
+    void updateReadCache(const KeyType& key, const ValueType& value) {
+        // If already in cache -> move to front (MRU)
+        if (readCache.find(key) != readCache.end()) {
+            lruList.remove(key);
+        }
+        else {
+            // Not in cache -> check capacity
+            if (readCache.size() >= maxReadCacheSize) {
+                // Evict LRU
+                KeyType lruKey = lruList.back();
+                lruList.pop_back();
+                readCache.erase(lruKey);
+            }
+        }
+
+        // Insert or update the key
+        lruList.push_front(key);
+        readCache[key] = value;
+    }
+
 
     std::string timestampename() {
         const auto now = std::chrono::system_clock::now();
@@ -532,6 +558,17 @@ public:
     template <typename KeyType, typename ValueType>
     ErrorCode search(KeyType key, ValueType& value)
     {
+        // DRAM Read Cache Lookup
+        auto cacheIt = readCache.find(key);
+        if (cacheIt != readCache.end()) {
+            // Update LRU position
+            lruList.remove(key);
+            lruList.push_front(key);
+
+            value = cacheIt->second;
+            return ErrorCode::Success;
+        }
+
         if (!root) return ErrorCode::KeyDoesNotExist;
 
         std::shared_ptr<Node<KeyType, ValueType>> current = root;
@@ -591,6 +628,8 @@ public:
                 return ErrorCode::KeyDoesNotExist;
             }
         }
+        updateReadCache(key, value);
+
 
         return ErrorCode::Success;
     }
@@ -948,12 +987,12 @@ public:
 
             // 6) Message cleanup logic based on NVM-awareness
             if (child->isLeaf) {
-                // Message applied to a node outside NVM → remove from buffer
+                // Message applied to a node outside NVM -> remove from buffer
                 sharedBuffer.erase(msgIt);
                 messageToNodeMap.erase(key);
             }
             else {
-                // Message is still in NVM tree, only relabeled → do not erase
+                // Message is still in NVM tree, only relabeled -> do not erase
                 messageToNodeMap[key] = child;
                 nodeMessageMap[child].push_back(key);
             }
@@ -977,10 +1016,10 @@ public:
     ErrorCode splitLeaf(std::shared_ptr<Node<KeyType, ValueType>> parent,
         std::shared_ptr<Node<KeyType, ValueType>> leaf)
     {
-        // Step 1: Create a new sibling node
+        // Create a new sibling node
         std::shared_ptr<Node<KeyType, ValueType>> sibling = std::make_shared<Node<KeyType, ValueType>>(true);
 
-        // Step 2: Determine the midpoint to split
+        // Determine the midpoint to split
         int mid = static_cast<int>(leaf->keys.size()) / 2;
 
         // Step 3: Move half of the keys/values to the sibling
@@ -991,10 +1030,10 @@ public:
         leaf->keys.resize(mid);
         leaf->values.resize(mid);
 
-        // Step 4: Determine the pivot key (smallest key in the sibling)
+        // Determine the pivot key (smallest key in the sibling)
         KeyType pivotKey = sibling->keys[0];
 
-        // Step 5: Reassign buffered messages to the sibling if key >= pivotKey
+        // Reassign buffered messages to the sibling if key >= pivotKey
         auto it = nodeMessageMap.find(leaf);
         if (it != nodeMessageMap.end()) {
             std::vector<KeyType> keysToMove;
@@ -1018,7 +1057,7 @@ public:
             }
         }
 
-        // Step 6: If no parent, create a new root
+        // If no parent, create a new root
         if (!parent)
         {
             std::shared_ptr<Node<KeyType, ValueType>> newRoot = std::make_shared<Node<KeyType, ValueType>>(false);
@@ -1029,14 +1068,14 @@ public:
         }
         else
         {
-            // Step 7: Insert pivotKey into parent and place sibling to the right of leaf
+            // Insert pivotKey into parent and place sibling to the right of leaf
             auto it = std::lower_bound(parent->keys.begin(), parent->keys.end(), pivotKey);
             parent->keys.insert(it, pivotKey);
 
             auto childIt = std::find(parent->children.begin(), parent->children.end(), leaf);
             parent->children.insert(childIt + 1, sibling);
 
-            // Step 8: Check if the parent also needs to split
+            // Check if the parent also needs to split
             if (parent->keys.size() >= m_nDegree)
             {
                 std::shared_ptr<Node<KeyType, ValueType>> grandparent = findParent(root, parent);
@@ -1275,6 +1314,19 @@ public:
             std::cout << "Node[" << key << "] -> freq = " << freq << "\n";
         }
     }
+
+    void printReadCache() const {
+    std::cout << "\n--- [DEBUG] DRAM Read Cache ---\n";
+    if (readCache.empty()) {
+        std::cout << "(empty)\n";
+        return;
+    }
+
+    for (const auto& [key, val] : readCache) {
+        std::cout << "Key: " << key << ", Value: " << val << "\n";
+    }
+}
+
 
 
 
