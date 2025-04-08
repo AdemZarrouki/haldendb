@@ -2,6 +2,7 @@
 #include "Node.hpp"
 #include "ErrorCodes.h"
 #include "Operations.h"
+#include "nvm.hpp"
 #include <iostream>
 #include <algorithm>
 #include <utility>
@@ -26,20 +27,24 @@
 
 using namespace std;
 
+
+
 template <typename KeyType, typename ValueType>
 class BEpsilonTree
 {
 public:
     std::shared_ptr<Node<KeyType, ValueType>> root;
+    PMEMobjpool* pmemPoolHandle = nullptr;  // NVM pool for shared buffer
+
     uint32_t m_nDegree;
     uint32_t maxBufferSize;
-    std::string logFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_test1.log";
+    std::string logFilename = "/home/ademzarrouki/Desktop/Benchmark/nvm_tree_test1.log";
     int opCounter = 0;
     int checkpointFrequency = 5;
     bool isReplaying = false;
 
     // Shared buffer
-    std::unordered_map<KeyType, std::tuple<Operations, KeyType, ValueType>> sharedBuffer;
+  
     std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
     std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
     std::unordered_map<KeyType, int> nodeFrequency;
@@ -67,8 +72,31 @@ public:
             root = std::make_shared<Node<KeyType, ValueType>>(true); // New tree
         }
 
+        // === Initialize NVM Pool for shared buffer ===
+        const std::string pmemPath = "/home/ademzarrouki/Desktop/Benchmark/shared_buffer_pool.pmem";
+
+        std::cout << "[DEBUG] Trying to open PMEM pool at: " << pmemPath << "\n";
+
+        pmemPoolHandle = pmemobj_open(pmemPath.c_str(), LAYOUT_NAME);
+        if (!pmemPoolHandle) {
+            std::cout << "[DEBUG] Pool not found. Creating new PMEM pool...\n";
+            pmemPoolHandle = pmemobj_create(pmemPath.c_str(), LAYOUT_NAME,
+                                            64 * 1024 * 1024, 0666);  // Try 64MB for now
+            if (!pmemPoolHandle) {
+                std::cerr << "[ERROR] Failed to create PMEM pool! Exiting.\n";
+                perror("pmemobj_create");
+                exit(1);
+            } else {
+                std::cout << "[NVM] New PMEM pool created successfully.\n";
+            }
+        } else {
+            std::cout << "[NVM] Existing PMEM pool opened successfully.\n";
+        }
+
+
+
         // === Replay Binary WAL if present ===
-        std::ifstream walBin("C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal", std::ios::binary);
+        std::ifstream walBin("/home/ademzarrouki/Desktop/Benchmark/nvm_tree_bin.wal", std::ios::binary);
         if (walBin.is_open()) {
             isReplaying = true;
             while (!walBin.eof()) {
@@ -112,7 +140,7 @@ public:
     ~BEpsilonTree()
     {
         // Save final tree
-        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
+        saveTreeToFile(root, "/home/ademzarrouki/Desktop/Benchmark/tree_data.bin");
 
         // Checkpoint if we have outstanding ops
         if (opCounter > 0) {
@@ -120,8 +148,8 @@ public:
         }
 
         // Backup and clear binary WAL
-        const std::string binWal = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal";
-        const std::string bakName = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_bin_backup" + timestampename() + ".bak";
+        const std::string binWal = "/home/ademzarrouki/Desktop/Benchmark/nvm_tree_bin.wal";
+        const std::string bakName = "/home/ademzarrouki/Desktop/Benchmark/wal_bin_backup" + timestampename() + ".bak";
 
         std::ifstream src(binWal, std::ios::binary);
         std::ofstream dst(bakName, std::ios::binary);
@@ -134,9 +162,110 @@ public:
         // Truncate original WAL
         std::ofstream clear(binWal, std::ios::trunc | std::ios::binary);
         clear.close();
+
+        if (pmemPoolHandle) {
+            pmemobj_close(pmemPoolHandle);
+            pmemPoolHandle = nullptr;
+        }
+        
     }
 
 private:
+
+
+ErrorCode insertToNVMSharedBuffer(Operations op, const KeyType& key, const ValueType& value = ValueType{}) {
+    if (!pmemPoolHandle) return ErrorCode::Error;
+
+    TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+    auto* rootPtr = D_RW(root);
+
+    // === Step 1: Search for existing message on the same key ===
+    int existingIndex = -1;
+    for (int i = 0; i < rootPtr->count; ++i) {
+        message* msgPtr = D_RW(rootPtr->messages[i]);
+        if (msgPtr->key_size == sizeof(KeyType) &&
+            std::memcmp(msgPtr->key_data, &key, sizeof(KeyType)) == 0) {
+            existingIndex = i;
+            break;
+        }
+    }
+
+    // === Step 2: Coalescing logic ===
+    if (existingIndex != -1) {
+        message* msgPtr = D_RW(rootPtr->messages[existingIndex]);
+        Operations prevOp = static_cast<Operations>(msgPtr->opCode);
+
+        switch (prevOp) {
+            case Operations::Insert:
+                if (op == Operations::Update) {
+                    msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
+                    std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                    return ErrorCode::Success;
+                } else if (op == Operations::Delete) {
+                    // Remove message by shifting later entries back
+                    for (int j = existingIndex + 1; j < rootPtr->count; ++j)
+                        rootPtr->messages[j - 1] = rootPtr->messages[j];
+                    rootPtr->count--;
+                    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
+                    return ErrorCode::Success;
+                }
+                break;
+            case Operations::Update:
+                if (op == Operations::Update) {
+                    std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                    return ErrorCode::Success;
+                } else if (op == Operations::Delete) {
+                    msgPtr->opCode = static_cast<uint8_t>(Operations::Delete);
+                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                    return ErrorCode::Success;
+                }
+                break;
+            case Operations::Delete:
+                if (op == Operations::Insert) {
+                    msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
+                    std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                    return ErrorCode::Success;
+                }
+                break;
+            default:
+                break;
+        }
+
+        // Default fallback: overwrite with new message type
+        msgPtr->opCode = static_cast<uint8_t>(op);
+        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+        return ErrorCode::Success;
+    }
+
+    // === Step 3: No existing message found → insert new one ===
+    if (rootPtr->count >= MAX_NVM_MESSAGES) {
+        std::cerr << "[NVM] Shared buffer is full!\n";
+        return ErrorCode::Error;
+    }
+
+    TOID(message) msg;
+    if (pmemobj_alloc(pmemPoolHandle, &msg.oid, sizeof(message), 0, nullptr, nullptr) != 0) {
+        std::cerr << "[NVM] Failed to allocate message in PMEM!\n";
+        return ErrorCode::Error;
+    }
+
+    D_RW(msg)->opCode = static_cast<uint8_t>(op);
+    D_RW(msg)->key_size = sizeof(KeyType);
+    D_RW(msg)->val_size = sizeof(ValueType);
+    std::memcpy(D_RW(msg)->key_data, &key, sizeof(KeyType));
+    std::memcpy(D_RW(msg)->val_data, &value, sizeof(ValueType));
+    pmemobj_persist(pmemPoolHandle, D_RW(msg), sizeof(message));
+
+    rootPtr->messages[rootPtr->count++] = msg;
+    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
+
+    return ErrorCode::Success;
+}
+
 
     // Simple LRU read-cache update
     void updateReadCache(const KeyType& key, const ValueType& value) {
@@ -177,9 +306,9 @@ private:
 
     void checkpoint() {
         // Save tree to disk
-        saveTreeToFile(root, "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\tree_data.bin");
+        saveTreeToFile(root, "/home/ademzarrouki/Desktop/Benchmark/tree_data.bin");
 
-        std::string backupFilename = "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\wal_backup" + timestampename() + ".bak";
+        std::string backupFilename = "/home/ademzarrouki/Desktop/Benchmark/wal_backup" + timestampename() + ".bak";
 
         // Copy textual WAL to a backup
         std::ifstream src(logFilename, std::ios::binary);
@@ -208,7 +337,7 @@ private:
 
     void logOperationBinary(Operations op, const KeyType& key, const ValueType& value = ValueType{}) {
         if (isReplaying) return;
-        std::ofstream log("C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\nvm_tree_bin.wal",
+        std::ofstream log("/home/ademzarrouki/Desktop/Benchmark/nvm_tree_bin.wal",
             std::ios::binary | std::ios::app);
         if (!log.is_open()) {
             std::cerr << "Failed to open binary WAL.\n";
@@ -544,9 +673,9 @@ public:
         // Check global buffer for a message on 'key'
         std::optional<std::tuple<Operations, KeyType, ValueType>> bufferedMessage;
         {
-            auto it = sharedBuffer.find(key);
-            if (it != sharedBuffer.end())
-                bufferedMessage = it->second;
+            //auto it = sharedBuffer.find(key);
+            //if (it != sharedBuffer.end())
+                //bufferedMessage = it->second;
         }
 
         // Descend to leaf
@@ -650,7 +779,7 @@ public:
 
     Done:
         // Overlay buffered messages in [low, high]
-        for (auto& [key, msg] : sharedBuffer)
+        /*for (auto& [key, msg] : sharedBuffer)
         {
             if (key < low || key > high) continue;
             auto [op, _, val] = msg;
@@ -671,7 +800,7 @@ public:
                     [&](auto& p) {return p.first == key; });
                 result.erase(it, result.end());
             }
-        }
+        }*/
 
         // Sort & unique
         std::sort(result.begin(), result.end(),
@@ -735,70 +864,26 @@ public:
 
     // Insert op into buffer of an internal node
     ErrorCode insertBuffered(std::shared_ptr<Node<KeyType, ValueType>> node,
-        Operations op, KeyType key, ValueType value)
-    {
-        // If buffer is “full,” flush the least-frequently-used node
-        if (sharedBuffer.size() >= maxBufferSize) {
-            ErrorCode result = flushLFUNode();
-            if (result != ErrorCode::Success) return result;
+        Operations op, KeyType key, ValueType value) {
+        // === Step 1: Insert to NVM shared buffer ===
+        ErrorCode res = insertToNVMSharedBuffer(op, key, value);
+        if (res != ErrorCode::Success) return res;
+
+        // === Step 2: Track message-node mappings ===
+        auto& keyList = nodeMessageMap[node];
+        if (std::find(keyList.begin(), keyList.end(), key) == keyList.end()) {
+        keyList.push_back(key);
         }
 
-        auto it = sharedBuffer.find(key);
-        if (it != sharedBuffer.end()) {
-            auto [prevOp, _, prevVal] = it->second;
-            // Coalescing logic:
-            if (prevOp == Operations::Insert && op == Operations::Update) {
-                // Insert -> Update = Insert
-                sharedBuffer[key] = { Operations::Insert, key, value };
-            }
-            else if (prevOp == Operations::Insert && op == Operations::Delete) {
-                // Insert -> Delete = remove the Insert
-                sharedBuffer.erase(it);
-                messageToNodeMap.erase(key);
-                auto& vecKeys = nodeMessageMap[node];
-                vecKeys.erase(std::remove(vecKeys.begin(), vecKeys.end(), key), vecKeys.end());
-                return ErrorCode::Success;
-            }
-            else if (prevOp == Operations::Update && op == Operations::Delete) {
-                // Update -> Delete = Delete
-                sharedBuffer[key] = { Operations::Delete, key, ValueType{} };
-            }
-            else if (prevOp == Operations::Update && op == Operations::Update) {
-                // Update -> Update = (latest) Update
-                sharedBuffer[key] = { Operations::Update, key, value };
-            }
-            else if (prevOp == Operations::Delete && op == Operations::Insert) {
-                // Delete -> Insert = Upsert => treat as Insert
-                sharedBuffer[key] = { Operations::Insert, key, value };
-            }
-            else {
-                // Overwrite
-                sharedBuffer[key] = { op, key, value };
-            }
-        }
-        else {
-            sharedBuffer[key] = { op, key, value };
-        }
-
-        // Track which node holds the message
-        auto& klist = nodeMessageMap[node];
-        if (std::find(klist.begin(), klist.end(), key) == klist.end()) {
-            klist.push_back(key);
-        }
         messageToNodeMap[key] = node;
 
-        // Increment frequency
+        // === Step 3: Increment frequency for LFU tracking ===
         KeyType nodeKey = getNodeKey(node);
         nodeFrequency[nodeKey]++;
 
-        if (sharedBuffer.size() >= maxBufferSize) {
-            ErrorCode result = flushLFUNode();
-            if (result != ErrorCode::Success) return result;
-        }
-
         return ErrorCode::Success;
-
     }
+
 
     // Flush the least-frequently-used node
     ErrorCode flushLFUNode()
@@ -855,14 +940,14 @@ public:
         std::sort(keysToFlush.begin(), keysToFlush.end());
         keysToFlush.erase(std::unique(keysToFlush.begin(), keysToFlush.end()), keysToFlush.end());
 
-        for (const auto& key : keysToFlush)
+        /*for (const auto& key : keysToFlush)
         {
             auto msgIt = sharedBuffer.find(key);
             if (msgIt == sharedBuffer.end()) continue;
 
             auto [opType, msgKey, msgValue] = msgIt->second;
 
-            // Descend to correct child using lower_bound
+             Descend to correct child using lower_bound
             size_t idx = std::lower_bound(node->keys.begin(), node->keys.end(), msgKey)
                 - node->keys.begin();
 
@@ -889,10 +974,10 @@ public:
                     child->keys.insert(itK, msgKey);
                     child->values.insert(child->values.begin() + insertPos, msgValue);
 
-                    /*if (child->keys.size() >= m_nDegree) {
+                    if (child->keys.size() >= m_nDegree) {
                         auto parent = findParent(root, child);
                         splitLeaf(parent, child);
-                        }*/
+                        }
                     if (child->keys.size() >= m_nDegree) 
                     {
                         ErrorCode result = splitLeaf(node, child);
@@ -936,7 +1021,7 @@ public:
 
             // If child is leaf, message is resolved
             if (child->isLeaf) {
-                sharedBuffer.erase(msgIt);
+                //sharedBuffer.erase(msgIt);
                 messageToNodeMap.erase(key);
             }
             else {
@@ -948,9 +1033,9 @@ public:
             std::cout << "\n[DEBUG]Tree after Inserting key " << key << "\n";
             this->display(this->root, 0); // Debug: show tree after flush
             // Debug: show tree after flush
-			std::cout << "\n[DEBUG]End of tree after Inserting key " << key << "\n"; */
+			std::cout << "\n[DEBUG]End of tree after Inserting key " << key << "\n"; 
 
-        }
+        }*/
         return ErrorCode::Success;
     }
 
@@ -1161,27 +1246,6 @@ public:
         }
     }
 
-    void printSharedBuffer() const {
-        std::cout << "\n--- [DEBUG] Shared Buffer Contents ---\n";
-        if (sharedBuffer.empty()) {
-            std::cout << "(empty)\n";
-            return;
-        }
-        for (auto& [k, message] : sharedBuffer) {
-            auto [opType, key, val] = message;
-            switch (opType) {
-            case Operations::Insert:
-                std::cout << "INSERT(" << key << " : " << val << ")\n"; break;
-            case Operations::Update:
-                std::cout << "UPDATE(" << key << " : " << val << ")\n"; break;
-            case Operations::Delete:
-                std::cout << "DELETE(" << key << ")\n"; break;
-            default:
-                std::cout << "UNKNOWN(" << key << ")\n";
-            }
-        }
-    }
-
     void printNodeMessageMap() const {
         std::cout << "\n--- [DEBUG] nodeMessageMap Contents ---\n";
         if (nodeMessageMap.empty()) {
@@ -1237,5 +1301,68 @@ public:
             std::cout << "Key: " << k << ", Value: " << v << "\n";
         }
     }
+
+    void printNVMSharedBuffer() {
+        TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+        auto* rootPtr = D_RO(root);
+        std::cout << "\n[NVM BUFFER DEBUG] Current entries: " << rootPtr->count << "\n";
+        for (int i = 0; i < rootPtr->count; ++i) {
+            auto* msg = D_RO(rootPtr->messages[i]);
+            std::cout << decodeMessageEntry(i, *msg) << "\n";
+        }
+    }
+    
+
+    std::string decodeMessageEntry(int index, const message& msg) {
+        std::stringstream ss;
+        ss << "[" << index << "] ";
+    
+        switch (msg.opCode) {
+            case 0: ss << "Insert"; break;
+            case 1: ss << "Search"; break;
+            case 2: ss << "Update"; break;
+            case 3: ss << "Delete"; break;
+            case 4: ss << "Upsert"; break;
+            default: ss << "Unknown(" << static_cast<int>(msg.opCode) << ")";
+        }
+    
+        ss << " | Key: ";
+        if (msg.key_size == 4) {
+            int32_t key;
+            std::memcpy(&key, msg.key_data, 4);
+            ss << key;
+        } else if (msg.key_size == 8) {
+            int64_t key;
+            std::memcpy(&key, msg.key_data, 8);
+            ss << key;
+        } else if (msg.key_size == 16) {
+            for (int i = 0; i < 16; ++i)
+                ss << std::hex << std::setw(2) << std::setfill('0')
+                   << static_cast<int>(static_cast<unsigned char>(msg.key_data[i]));
+        } else {
+            ss << "(unknown/" << msg.key_size << " bytes)";
+        }
+    
+        ss << " | Value: ";
+        if (msg.val_size == 4) {
+            int32_t val;
+            std::memcpy(&val, msg.val_data, 4);
+            ss << val;
+        } else if (msg.val_size == 8) {
+            int64_t val;
+            std::memcpy(&val, msg.val_data, 8);
+            ss << val;
+        } else if (msg.val_size == 16) {
+            for (int i = 0; i < 16; ++i)
+                ss << std::hex << std::setw(2) << std::setfill('0')
+                   << static_cast<int>(static_cast<unsigned char>(msg.val_data[i]));
+        } else {
+            ss << "(unknown/" << msg.val_size << " bytes)";
+        }
+    
+        return ss.str();
+    }
+    
+
 };
 
