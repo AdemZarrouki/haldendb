@@ -37,14 +37,12 @@ public:
     PMEMobjpool* pmemPoolHandle = nullptr;  // NVM pool for shared buffer
 
     uint32_t m_nDegree;
-    uint32_t maxBufferSize;
     std::string logFilename = "/home/ademzarrouki/Desktop/Benchmark/nvm_tree_test1.log";
     int opCounter = 0;
     int checkpointFrequency = 5;
     bool isReplaying = false;
 
-    // Shared buffer
-  
+    
     std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
     std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
     std::unordered_map<KeyType, int> nodeFrequency;
@@ -52,12 +50,11 @@ public:
     // DRAM read buffer
     std::unordered_map<KeyType, ValueType> readCache;
     std::list<KeyType> lruList;
-    size_t maxReadCacheSize = 100;  // can be set as desired
+    size_t maxReadCacheSize = 100;
 
-    BEpsilonTree(int degree, int maxBufSize, const std::string& filename, int checkpointFreq = -1)
+    BEpsilonTree(int degree, const std::string& filename, int checkpointFreq = -1)
     {
         this->m_nDegree = degree;
-        this->maxBufferSize = maxBufSize;
         if (checkpointFreq > 0)
             this->checkpointFrequency = checkpointFreq;
 
@@ -92,8 +89,6 @@ public:
         } else {
             std::cout << "[NVM] Existing PMEM pool opened successfully.\n";
         }
-
-
 
         // === Replay Binary WAL if present ===
         std::ifstream walBin("/home/ademzarrouki/Desktop/Benchmark/nvm_tree_bin.wal", std::ios::binary);
@@ -170,9 +165,8 @@ public:
         
     }
 
+
 private:
-
-
 ErrorCode insertToNVMSharedBuffer(Operations op, const KeyType& key, const ValueType& value = ValueType{}) {
     if (!pmemPoolHandle) return ErrorCode::Error;
 
@@ -241,12 +235,18 @@ ErrorCode insertToNVMSharedBuffer(Operations op, const KeyType& key, const Value
         return ErrorCode::Success;
     }
 
-    // === Step 3: No existing message found → insert new one ===
-    if (rootPtr->count >= MAX_NVM_MESSAGES) {
-        std::cerr << "[NVM] Shared buffer is full!\n";
-        return ErrorCode::Error;
+    // if buffer is full we need to flush
+    while (rootPtr->count >= MAX_NVM_MESSAGES) {
+        std::cout << "[NVM] Shared buffer full, flushing LFU node...\n";
+        auto flushResult = flushLFUNode();
+        if (flushResult != ErrorCode::Success) {
+            std::cerr << "[ERROR] Failed to flush any node. Shared buffer stuck.\n";
+            return ErrorCode::Error;
+        }
     }
+    
 
+    // === Step 3: No existing message found → insert new one ===
     TOID(message) msg;
     if (pmemobj_alloc(pmemPoolHandle, &msg.oid, sizeof(message), 0, nullptr, nullptr) != 0) {
         std::cerr << "[NVM] Failed to allocate message in PMEM!\n";
@@ -655,80 +655,59 @@ public:
     // === SEARCH OP ===
     ErrorCode search(KeyType key, ValueType& value)
     {
-        // 1) DRAM read cache
+        // 1. Check DRAM read cache
         auto cacheIt = readCache.find(key);
         if (cacheIt != readCache.end()) {
-            // refresh LRU
             lruList.remove(key);
             lruList.push_front(key);
             value = cacheIt->second;
             return ErrorCode::Success;
         }
 
-        // 2) Regular tree search
+        // 2. Check NVM shared buffer (unflushed message)
+        auto bufferedMessage = lookupInNVMBuffer(key);
+        if (bufferedMessage.has_value()) {
+            auto [op, val] = bufferedMessage.value();
+            if (op == Operations::Insert || op == Operations::Update) {
+                value = val;
+                updateReadCache(key, value);
+                return ErrorCode::Success;
+            }
+            if (op == Operations::Delete) {
+                return ErrorCode::KeyDoesNotExist;
+            }
+        }
+
+        // 3. Traverse the tree
         if (!root) return ErrorCode::KeyDoesNotExist;
 
         auto current = root;
-
-        // Check global buffer for a message on 'key'
-        std::optional<std::tuple<Operations, KeyType, ValueType>> bufferedMessage;
-        {
-            //auto it = sharedBuffer.find(key);
-            //if (it != sharedBuffer.end())
-                //bufferedMessage = it->second;
-        }
-
-        // Descend to leaf
-        while (!current->isLeaf)
-        {
-            // Use lower_bound to pick child
-            size_t i = std::lower_bound(current->keys.begin(),
-                current->keys.end(),
-                key) - current->keys.begin();
-
+        while (!current->isLeaf) {
+            size_t i = std::upper_bound(current->keys.begin(),
+                                        current->keys.end(),
+                                        key) - current->keys.begin();
             if (i >= current->children.size())
-                return ErrorCode::KeyDoesNotExist; // out of range
+                return ErrorCode::KeyDoesNotExist;
 
             current = current->children[i];
         }
 
-        // Now in leaf, search
+        // 4. Look in the leaf node
         auto keyIt = std::find(current->keys.begin(), current->keys.end(), key);
-        if (keyIt != current->keys.end())
-        {
+        if (keyIt != current->keys.end()) {
             size_t index = std::distance(current->keys.begin(), keyIt);
             value = current->values[index];
+            updateReadCache(key, value);
+            return ErrorCode::Success;
         }
-        else
-        {
-            // Possibly an unflushed Insert or Delete in buffer
-            if (bufferedMessage.has_value()) {
-                auto [op, _, val] = bufferedMessage.value();
-                if (op == Operations::Insert) {
-                    value = val;
-                    updateReadCache(key, value);
-                    return ErrorCode::Success;
-                }
-                else if (op == Operations::Delete) {
-                    return ErrorCode::KeyDoesNotExist;
-                }
-            }
-            return ErrorCode::KeyDoesNotExist;
-        }
+        std::cout << "[DEBUG] Failed to find key " << key << " in leaf with keys: ";
+        for (auto k : current->keys) std::cout << k << " ";
+        std::cout << "\n";
 
-        // If there's an Update in the buffer, apply it
-        if (bufferedMessage.has_value()) {
-            auto [op, _, val] = bufferedMessage.value();
-            if (op == Operations::Update) {
-                value = val;
-            }
-            else if (op == Operations::Delete) {
-                return ErrorCode::KeyDoesNotExist;
-            }
-        }
-        updateReadCache(key, value);
-        return ErrorCode::Success;
+
+        return ErrorCode::KeyDoesNotExist;
     }
+
 
     // === RANGE QUERY ===
     std::vector<std::pair<KeyType, ValueType>> rangeQuery(KeyType low, KeyType high)
@@ -736,40 +715,36 @@ public:
         std::vector<std::pair<KeyType, ValueType>> result;
         auto current = root;
 
-        // descend to first relevant leaf
-        while (!current->isLeaf) {
-            size_t i = std::lower_bound(current->keys.begin(),
-                current->keys.end(), low)
-                - current->keys.begin();
+        // Step 1: descend to first relevant leaf
+        while (current && !current->isLeaf) {
+            size_t i = std::upper_bound(current->keys.begin(),
+                                        current->keys.end(), low)
+                    - current->keys.begin();
             if (i >= current->children.size()) break;
             current = current->children[i];
         }
 
-        // scan leaves until keys exceed 'high'
-        while (current)
-        {
-            for (size_t i = 0; i < current->keys.size(); ++i)
-            {
+        // Step 2: scan leaves and collect in-range keys
+        while (current) {
+            for (size_t i = 0; i < current->keys.size(); ++i) {
                 KeyType k = current->keys[i];
                 if (k > high) goto Done;
                 if (k >= low) {
                     result.emplace_back(k, current->values[i]);
                 }
             }
-            // Move to next leaf in a naive B-tree style
+
+            // Move to next leaf naively
             auto parent = findParent(root, current);
             while (parent) {
                 size_t index = std::find(parent->children.begin(), parent->children.end(), current)
-                    - parent->children.begin();
+                            - parent->children.begin();
                 if (index + 1 < parent->children.size()) {
                     current = parent->children[index + 1];
-                    // descend to leaf
                     while (!current->isLeaf)
                         current = current->children[0];
                     break;
-                }
-                else {
-                    // go up
+                } else {
                     current = parent;
                     parent = findParent(root, parent);
                 }
@@ -778,39 +753,48 @@ public:
         }
 
     Done:
-        // Overlay buffered messages in [low, high]
-        /*for (auto& [key, msg] : sharedBuffer)
-        {
-            if (key < low || key > high) continue;
-            auto [op, _, val] = msg;
-            if (op == Operations::Insert || op == Operations::Update) {
-                // see if key is already in result
-                auto it = std::find_if(result.begin(), result.end(),
-                    [&](auto& p) {return p.first == key; });
-                if (it != result.end()) {
-                    it->second = val; // update
-                }
-                else {
-                    result.emplace_back(key, val);
-                }
-            }
-            else if (op == Operations::Delete) {
-                // remove from result
-                auto it = std::remove_if(result.begin(), result.end(),
-                    [&](auto& p) {return p.first == key; });
-                result.erase(it, result.end());
-            }
-        }*/
+        // Step 3: overlay messages from NVM shared buffer
+        if (pmemPoolHandle) {
+            TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+            auto* rootPtr = D_RO(root);
 
-        // Sort & unique
+            for (int i = 0; i < rootPtr->count; ++i) {
+                auto* msg = D_RO(rootPtr->messages[i]);
+                if (msg->key_size != sizeof(KeyType)) continue;
+
+                KeyType k;
+                std::memcpy(&k, msg->key_data, sizeof(KeyType));
+                if (k < low || k > high) continue;
+
+                Operations op = static_cast<Operations>(msg->opCode);
+                ValueType v;
+                std::memcpy(&v, msg->val_data, sizeof(ValueType));
+
+                if (op == Operations::Insert || op == Operations::Update) {
+                    auto it = std::find_if(result.begin(), result.end(),
+                        [&](const auto& pair) { return pair.first == k; });
+                    if (it != result.end()) {
+                        it->second = v;  // update existing
+                    } else {
+                        result.emplace_back(k, v);  // new entry
+                    }
+                } else if (op == Operations::Delete) {
+                    result.erase(std::remove_if(result.begin(), result.end(),
+                        [&](const auto& pair) { return pair.first == k; }), result.end());
+                }
+            }
+        }
+
+        // Step 4: sort and deduplicate (just in case)
         std::sort(result.begin(), result.end(),
-            [](auto& a, auto& b) {return a.first < b.first; });
+                [](const auto& a, const auto& b) { return a.first < b.first; });
         result.erase(std::unique(result.begin(), result.end(),
-            [](auto& a, auto& b) {return a.first == b.first; }),
-            result.end());
+                [](const auto& a, const auto& b) { return a.first == b.first; }),
+                result.end());
 
         return result;
     }
+
 
     // === INSERT OP ===
     ErrorCode insert(KeyType key, ValueType value)
@@ -939,103 +923,90 @@ public:
         // Sort & unique keys
         std::sort(keysToFlush.begin(), keysToFlush.end());
         keysToFlush.erase(std::unique(keysToFlush.begin(), keysToFlush.end()), keysToFlush.end());
-
-        /*for (const auto& key : keysToFlush)
+        for (const auto& key : keysToFlush)
         {
-            auto msgIt = sharedBuffer.find(key);
-            if (msgIt == sharedBuffer.end()) continue;
+            // 1. Locate message in NVM shared buffer
+            TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+            auto* rootPtr = D_RW(root);
+            message* msgPtr = nullptr;
 
-            auto [opType, msgKey, msgValue] = msgIt->second;
-
-             Descend to correct child using lower_bound
-            size_t idx = std::lower_bound(node->keys.begin(), node->keys.end(), msgKey)
-                - node->keys.begin();
-
-            if (idx >= node->children.size()) {
-                std::cerr << "[ERROR] Invalid child index in flushBuffer for key: " << msgKey << "\n";
-                continue;
+            for (int i = 0; i < rootPtr->count; ++i) {
+                auto* candidate = D_RW(rootPtr->messages[i]);
+                if (candidate->key_size == sizeof(KeyType) &&
+                    std::memcmp(candidate->key_data, &key, sizeof(KeyType)) == 0) {
+                    msgPtr = candidate;
+                    break;
+                }
             }
+            if (!msgPtr) continue;  // message not found (already flushed?)
+
+            Operations opType = static_cast<Operations>(msgPtr->opCode);
+            KeyType msgKey;
+            ValueType msgVal;
+            std::memcpy(&msgKey, msgPtr->key_data, sizeof(KeyType));
+            std::memcpy(&msgVal, msgPtr->val_data, sizeof(ValueType));
+
+            // 2. Route to correct child
+            size_t idx = std::upper_bound(node->keys.begin(), node->keys.end(), msgKey)
+                    - node->keys.begin();
+            if (idx >= node->children.size()) continue;
 
             auto child = node->children[idx];
 
-            if (!child->isLeaf)
-            {
-                insertBuffered(child, opType, msgKey, msgValue);
-            }
-            else
-            {
-                // Actually apply op in leaf
-                switch (opType)
-                {
-                case Operations::Insert:
-                {
-                    auto itK = std::lower_bound(child->keys.begin(), child->keys.end(), msgKey);
-                    size_t insertPos = std::distance(child->keys.begin(), itK);
-                    child->keys.insert(itK, msgKey);
-                    child->values.insert(child->values.begin() + insertPos, msgValue);
+            if (!child->isLeaf) {
+                // Internal child: buffer into it
+                insertBuffered(child, opType, msgKey, msgVal);
+            } else {
+                // Leaf: apply operation directly
+                auto it = std::find(child->keys.begin(), child->keys.end(), msgKey);
 
-                    if (child->keys.size() >= m_nDegree) {
-                        auto parent = findParent(root, child);
-                        splitLeaf(parent, child);
-                        }
-                    if (child->keys.size() >= m_nDegree) 
-                    {
-                        ErrorCode result = splitLeaf(node, child);
-                        if (result != ErrorCode::Success) return result;
-                        node = findParent(root, child);
-                        //node = root;
+                if (opType == Operations::Insert) {
+                    if (it == child->keys.end()) {
+                        auto insertIt = std::lower_bound(child->keys.begin(), child->keys.end(), msgKey);
+                        size_t pos = std::distance(child->keys.begin(), insertIt);
+                        child->keys.insert(insertIt, msgKey);
+                        child->values.insert(child->values.begin() + pos, msgVal);
                     }
-
-                    break;
-                }
-                case Operations::Update:
-                {
-                    auto itK = std::find(child->keys.begin(), child->keys.end(), msgKey);
-                    if (itK != child->keys.end()) {
-                        size_t pos = std::distance(child->keys.begin(), itK);
-                        child->values[pos] = msgValue;
+                } else if (opType == Operations::Update) {
+                    if (it != child->keys.end()) {
+                        size_t pos = std::distance(child->keys.begin(), it);
+                        child->values[pos] = msgVal;
                     }
-                    break;
-                }
-                case Operations::Delete:
-                {
-                    auto itK = std::find(child->keys.begin(), child->keys.end(), msgKey);
-                    if (itK != child->keys.end()) {
-                        size_t pos = std::distance(child->keys.begin(), itK);
-                        child->keys.erase(itK);
+                } else if (opType == Operations::Delete) {
+                    if (it != child->keys.end()) {
+                        size_t pos = std::distance(child->keys.begin(), it);
+                        child->keys.erase(it);
                         child->values.erase(child->values.begin() + pos);
-
-                        if (child->keys.size() < (m_nDegree / 2)) {
-                            auto parent = findParent(root, child);
-                            handleUnderflow(parent, child);
-                        }
                     }
-                    break;
-                }
-                default:
-                    std::cerr << "[WARN] Unknown op type in flush: "
-                        << static_cast<int>(opType) << "\n";
-                    break;
                 }
             }
 
-            // If child is leaf, message is resolved
-            if (child->isLeaf) {
-                //sharedBuffer.erase(msgIt);
-                messageToNodeMap.erase(key);
-            }
-            else {
-                // move the message reference to that child
-                messageToNodeMap[key] = child;
-                nodeMessageMap[child].push_back(key);
-            }
-            /*
-            std::cout << "\n[DEBUG]Tree after Inserting key " << key << "\n";
-            this->display(this->root, 0); // Debug: show tree after flush
-            // Debug: show tree after flush
-			std::cout << "\n[DEBUG]End of tree after Inserting key " << key << "\n"; 
+            // 3. Clean up buffer references
+            auto msgNodeIt = messageToNodeMap.find(key);
+            if (msgNodeIt != messageToNodeMap.end())
+                messageToNodeMap.erase(msgNodeIt);
 
-        }*/
+            auto& keyVec = nodeMessageMap[node];
+            keyVec.erase(std::remove(keyVec.begin(), keyVec.end(), key), keyVec.end());
+
+            // 4. Remove from NVM shared buffer (compact array)
+            for (int i = 0; i < rootPtr->count; ++i) {
+                auto* candidate = D_RW(rootPtr->messages[i]);
+                if (candidate == msgPtr) {
+                    // Free memory
+                    pmemobj_free(&rootPtr->messages[i].oid);
+
+                    // Shift all later entries
+                    for (int j = i + 1; j < rootPtr->count; ++j) {
+                        rootPtr->messages[j - 1] = rootPtr->messages[j];
+                    }
+                    rootPtr->count--;
+                    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
+                    break;
+                }
+            }
+        }
+
         return ErrorCode::Success;
     }
 
@@ -1362,7 +1333,27 @@ public:
     
         return ss.str();
     }
-    
+
+    std::optional<std::tuple<Operations, ValueType>> lookupInNVMBuffer(const KeyType& key)
+    {
+        if (!pmemPoolHandle) return std::nullopt;
+
+        TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+        auto* rootPtr = D_RO(root);
+
+        for (int i = 0; i < rootPtr->count; ++i) {
+            auto* msg = D_RO(rootPtr->messages[i]);
+            if (msg->key_size != sizeof(KeyType)) continue;
+
+            if (std::memcmp(msg->key_data, &key, sizeof(KeyType)) == 0) {
+                Operations op = static_cast<Operations>(msg->opCode);
+                ValueType val;
+                std::memcpy(&val, msg->val_data, sizeof(ValueType));
+                return std::make_tuple(op, val);
+            }
+        }
+
+        return std::nullopt;  // Not found
+    }
 
 };
-
