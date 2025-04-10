@@ -9,7 +9,11 @@ struct message;
 struct SharedBufferRoot;
 
 // 2) Define the layout macros *before* using the structs
+#ifdef _WIN32
+#define LAYOUT_NAME L"bepsilon_layout"
+#else
 #define LAYOUT_NAME "bepsilon_layout"
+#endif
 
 POBJ_LAYOUT_BEGIN(bepsilon_layout);
 POBJ_LAYOUT_ROOT(bepsilon_layout, SharedBufferRoot);
@@ -17,7 +21,7 @@ POBJ_LAYOUT_TOID(bepsilon_layout, message);
 POBJ_LAYOUT_END(bepsilon_layout);
 
 // 3) Now define your constants
-#define MAX_NVM_MESSAGES 1024
+#define MAX_NVM_MESSAGES 4
 #define MAX_KEY_SIZE 64
 #define MAX_VAL_SIZE 64
 

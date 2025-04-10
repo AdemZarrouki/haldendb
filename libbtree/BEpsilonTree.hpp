@@ -37,7 +37,7 @@ public:
     PMEMobjpool* pmemPoolHandle = nullptr;  // NVM pool for shared buffer
 
     uint32_t m_nDegree;
-    std::string logFilename = "/home/ademzarrouki/Desktop/Benchmark/nvm_tree_test1.log";
+    std::string logFilename = getPlatformPath("nvm_tree_test1.log");
     int opCounter = 0;
     int checkpointFrequency = 5;
     bool isReplaying = false;
@@ -69,15 +69,24 @@ public:
         }
 
         // === Initialize NVM Pool for shared buffer ===
-        const std::string pmemPath = "/home/ademzarrouki/Desktop/Benchmark/shared_buffer_pool.pmem";
+        const std::string pmemPath = getPlatformPath("shared_buffer_pool.pmem");
 
         std::cout << "[DEBUG] Trying to open PMEM pool at: " << pmemPath << "\n";
-
+        #ifdef _WIN32
+        std::wstring pmemPathW(pmemPath.begin(), pmemPath.end());
+        pmemPoolHandle = pmemobj_openW(pmemPathW.c_str(), LAYOUT_NAME);
+        #else
         pmemPoolHandle = pmemobj_open(pmemPath.c_str(), LAYOUT_NAME);
+        #endif
         if (!pmemPoolHandle) {
             std::cout << "[DEBUG] Pool not found. Creating new PMEM pool...\n";
+            #ifdef _WIN32
+            std::wstring pmemPathW(pmemPath.begin(), pmemPath.end());
+            pmemPoolHandle = pmemobj_createW(pmemPathW.c_str(), LAYOUT_NAME, 64 * 1024 * 1024, 0666);
+            #else
             pmemPoolHandle = pmemobj_create(pmemPath.c_str(), LAYOUT_NAME,
-                                            64 * 1024 * 1024, 0666);  // Try 64MB for now
+                                            64 * 1024 * 1024, 0666);
+            #endif
             if (!pmemPoolHandle) {
                 std::cerr << "[ERROR] Failed to create PMEM pool! Exiting.\n";
                 perror("pmemobj_create");
@@ -90,7 +99,7 @@ public:
         }
 
         // === Replay Binary WAL if present ===
-        std::ifstream walBin("/home/ademzarrouki/Desktop/Benchmark/nvm_tree_bin.wal", std::ios::binary);
+        std::ifstream walBin(getPlatformPath("nvm_tree_bin.wal"), std::ios::binary);
         if (walBin.is_open()) {
             isReplaying = true;
             while (!walBin.eof()) {
@@ -134,7 +143,7 @@ public:
     ~BEpsilonTree()
     {
         // Save final tree
-        saveTreeToFile(root, "/home/ademzarrouki/Desktop/Benchmark/tree_data.bin");
+        saveTreeToFile(root, getPlatformPath("tree_data.bin"));
 
         // Checkpoint if we have outstanding ops
         if (opCounter > 0) {
@@ -142,8 +151,8 @@ public:
         }
 
         // Backup and clear binary WAL
-        const std::string binWal = "/home/ademzarrouki/Desktop/Benchmark/nvm_tree_bin.wal";
-        const std::string bakName = "/home/ademzarrouki/Desktop/Benchmark/wal_bin_backup" + timestampename() + ".bak";
+        const std::string binWal = getPlatformPath("nvm_tree_bin.wal");
+        const std::string bakName = getPlatformPath("wal_bin_backup") + timestampename() + ".bak";
 
         std::ifstream src(binWal, std::ios::binary);
         std::ofstream dst(bakName, std::ios::binary);
@@ -307,9 +316,9 @@ private:
 
     void checkpoint() {
         // Save tree to disk
-        saveTreeToFile(root, "/home/ademzarrouki/Desktop/Benchmark/tree_data.bin");
+        saveTreeToFile(root, getPlatformPath("tree_data.bin"));
 
-        std::string backupFilename = "/home/ademzarrouki/Desktop/Benchmark/wal_backup" + timestampename() + ".bak";
+        std::string backupFilename = getPlatformPath("wal_backup") + timestampename() + ".bak";
 
         // Copy textual WAL to a backup
         std::ifstream src(logFilename, std::ios::binary);
@@ -338,7 +347,7 @@ private:
 
     void logOperationBinary(Operations op, const KeyType& key, const ValueType& value = ValueType{}) {
         if (isReplaying) return;
-        std::ofstream log("/home/ademzarrouki/Desktop/Benchmark/nvm_tree_bin.wal",
+        std::ofstream log(getPlatformPath("nvm_tree_bin.wal"),
             std::ios::binary | std::ios::app);
         if (!log.is_open()) {
             std::cerr << "Failed to open binary WAL.\n";
@@ -1435,4 +1444,12 @@ public:
         return res;
     }
 
+    std::string getPlatformPath(const std::string& filename) {
+        #ifdef _WIN32
+            return "C:\\Users\\zarroa\\Desktop\\B-Epsilon_Tree\\" + filename;
+        #else
+            return "/home/ademzarrouki/Desktop/Benchmark/" + filename;
+        #endif
+        }
+        
 };
