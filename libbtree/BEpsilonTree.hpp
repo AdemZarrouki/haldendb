@@ -42,7 +42,6 @@ public:
     int checkpointFrequency = 5;
     bool isReplaying = false;
 
-    
     std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
     std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
     std::unordered_map<KeyType, int> nodeFrequency;
@@ -167,105 +166,107 @@ public:
 
 
 private:
-ErrorCode insertToNVMSharedBuffer(Operations op, const KeyType& key, const ValueType& value = ValueType{}) {
-    if (!pmemPoolHandle) return ErrorCode::Error;
+    ErrorCode insertToNVMSharedBuffer(Operations op, const KeyType& key, const ValueType& value = ValueType{}) 
+    {
+        if (!pmemPoolHandle) return ErrorCode::Error;
 
-    TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
-    auto* rootPtr = D_RW(root);
+        TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+        auto* rootPtr = D_RW(root);
 
-    // === Step 1: Search for existing message on the same key ===
-    int existingIndex = -1;
-    for (int i = 0; i < rootPtr->count; ++i) {
-        message* msgPtr = D_RW(rootPtr->messages[i]);
-        if (msgPtr->key_size == sizeof(KeyType) &&
-            std::memcmp(msgPtr->key_data, &key, sizeof(KeyType)) == 0) {
-            existingIndex = i;
-            break;
-        }
-    }
-
-    // === Step 2: Coalescing logic ===
-    if (existingIndex != -1) {
-        message* msgPtr = D_RW(rootPtr->messages[existingIndex]);
-        Operations prevOp = static_cast<Operations>(msgPtr->opCode);
-
-        switch (prevOp) {
-            case Operations::Insert:
-                if (op == Operations::Update) {
-                    msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
-                    std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                    return ErrorCode::Success;
-                } else if (op == Operations::Delete) {
-                    // Remove message by shifting later entries back
-                    for (int j = existingIndex + 1; j < rootPtr->count; ++j)
-                        rootPtr->messages[j - 1] = rootPtr->messages[j];
-                    rootPtr->count--;
-                    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
-                    return ErrorCode::Success;
-                }
+        // Search for existing message on the same key
+        int existingIndex = -1;
+        for (int i = 0; i < rootPtr->count; ++i) {
+            message* msgPtr = D_RW(rootPtr->messages[i]);
+            if (msgPtr->key_size == sizeof(KeyType) &&
+                std::memcmp(msgPtr->key_data, &key, sizeof(KeyType)) == 0) {
+                existingIndex = i;
                 break;
-            case Operations::Update:
-                if (op == Operations::Update) {
-                    std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                    return ErrorCode::Success;
-                } else if (op == Operations::Delete) {
-                    msgPtr->opCode = static_cast<uint8_t>(Operations::Delete);
-                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                    return ErrorCode::Success;
-                }
-                break;
-            case Operations::Delete:
-                if (op == Operations::Insert) {
-                    msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
-                    std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-                    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                    return ErrorCode::Success;
-                }
-                break;
-            default:
-                break;
+            }
         }
 
-        // Default fallback: overwrite with new message type
-        msgPtr->opCode = static_cast<uint8_t>(op);
-        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-        return ErrorCode::Success;
-    }
+        // Coalescing logic
+        if (existingIndex != -1) {
+            message* msgPtr = D_RW(rootPtr->messages[existingIndex]);
+            Operations prevOp = static_cast<Operations>(msgPtr->opCode);
 
-    // if buffer is full we need to flush
-    while (rootPtr->count >= MAX_NVM_MESSAGES) {
-        std::cout << "[NVM] Shared buffer full, flushing LFU node...\n";
-        auto flushResult = flushLFUNode();
-        if (flushResult != ErrorCode::Success) {
-            std::cerr << "[ERROR] Failed to flush any node. Shared buffer stuck.\n";
+            switch (prevOp) {
+                case Operations::Insert:
+                    if (op == Operations::Update) {
+                        msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
+                        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                        return ErrorCode::Success;
+                    } else if (op == Operations::Delete) {
+                        for (int j = existingIndex + 1; j < rootPtr->count; ++j)
+                            rootPtr->messages[j - 1] = rootPtr->messages[j];
+                        rootPtr->count--;
+                        pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
+                        return ErrorCode::Success;
+                    }
+                    break;
+                case Operations::Update:
+                    if (op == Operations::Update) {
+                        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                        return ErrorCode::Success;
+                    } else if (op == Operations::Delete) {
+                        msgPtr->opCode = static_cast<uint8_t>(Operations::Delete);
+                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                        return ErrorCode::Success;
+                    }
+                    break;
+                case Operations::Delete:
+                    if (op == Operations::Insert) {
+                        msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
+                        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+                        return ErrorCode::Success;
+                    }
+                    break;
+                default:
+                    break;
+            }
+
+            // Fallback: overwrite message
+            msgPtr->opCode = static_cast<uint8_t>(op);
+            std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+            pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+            return ErrorCode::Success;
+        }
+
+        // Flush if full
+        while (rootPtr->count >= MAX_NVM_MESSAGES) {
+            std::cout << "[NVM] Shared buffer full, flushing...\n";
+            auto flushResult = flushMostBufferedNode();
+            if (flushResult != ErrorCode::Success) {
+                std::cerr << "[ERROR] Failed to flush any node. Shared buffer stuck.\n";
+                return ErrorCode::Error;
+            }
+
+            // Recompute rootPtr in case root was replaced during flush/split
+            root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+            rootPtr = D_RW(root);
+        }
+
+        // Insert new message
+        TOID(message) msg;
+        if (pmemobj_alloc(pmemPoolHandle, &msg.oid, sizeof(message), 0, nullptr, nullptr) != 0) {
+            std::cerr << "[NVM] Failed to allocate message in PMEM!\n";
             return ErrorCode::Error;
         }
+
+        D_RW(msg)->opCode = static_cast<uint8_t>(op);
+        D_RW(msg)->key_size = sizeof(KeyType);
+        D_RW(msg)->val_size = sizeof(ValueType);
+        std::memcpy(D_RW(msg)->key_data, &key, sizeof(KeyType));
+        std::memcpy(D_RW(msg)->val_data, &value, sizeof(ValueType));
+        pmemobj_persist(pmemPoolHandle, D_RW(msg), sizeof(message));
+
+        rootPtr->messages[rootPtr->count++] = msg;
+        pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
+
+        return ErrorCode::Success;
     }
-    
-
-    // === Step 3: No existing message found → insert new one ===
-    TOID(message) msg;
-    if (pmemobj_alloc(pmemPoolHandle, &msg.oid, sizeof(message), 0, nullptr, nullptr) != 0) {
-        std::cerr << "[NVM] Failed to allocate message in PMEM!\n";
-        return ErrorCode::Error;
-    }
-
-    D_RW(msg)->opCode = static_cast<uint8_t>(op);
-    D_RW(msg)->key_size = sizeof(KeyType);
-    D_RW(msg)->val_size = sizeof(ValueType);
-    std::memcpy(D_RW(msg)->key_data, &key, sizeof(KeyType));
-    std::memcpy(D_RW(msg)->val_data, &value, sizeof(ValueType));
-    pmemobj_persist(pmemPoolHandle, D_RW(msg), sizeof(message));
-
-    rootPtr->messages[rootPtr->count++] = msg;
-    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
-
-    return ErrorCode::Success;
-}
-
 
     // Simple LRU read-cache update
     void updateReadCache(const KeyType& key, const ValueType& value) {
@@ -715,7 +716,7 @@ public:
         std::vector<std::pair<KeyType, ValueType>> result;
         auto current = root;
 
-        // Step 1: descend to first relevant leaf
+        // descend to first relevant leaf
         while (current && !current->isLeaf) {
             size_t i = std::upper_bound(current->keys.begin(),
                                         current->keys.end(), low)
@@ -724,7 +725,7 @@ public:
             current = current->children[i];
         }
 
-        // Step 2: scan leaves and collect in-range keys
+        // scan leaves and collect in-range keys
         while (current) {
             for (size_t i = 0; i < current->keys.size(); ++i) {
                 KeyType k = current->keys[i];
@@ -753,7 +754,7 @@ public:
         }
 
     Done:
-        // Step 3: overlay messages from NVM shared buffer
+        // overlay messages from NVM shared buffer
         if (pmemPoolHandle) {
             TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
             auto* rootPtr = D_RO(root);
@@ -785,7 +786,7 @@ public:
             }
         }
 
-        // Step 4: sort and deduplicate (just in case)
+        // sort and deduplicate (just in case)
         std::sort(result.begin(), result.end(),
                 [](const auto& a, const auto& b) { return a.first < b.first; });
         result.erase(std::unique(result.begin(), result.end(),
@@ -817,7 +818,8 @@ public:
         // If internal node
         if (!current->isLeaf)
         {
-            ErrorCode result = insertBuffered(current, Operations::Insert, key, value);
+            auto bufferTarget = findBufferTarget(key);
+            ErrorCode result = insertBuffered(bufferTarget, Operations::Insert, key, value);
             if (result != ErrorCode::Success) {
                 return result;
             }
@@ -847,27 +849,35 @@ public:
     }
 
     // Insert op into buffer of an internal node
-    ErrorCode insertBuffered(std::shared_ptr<Node<KeyType, ValueType>> node,
-        Operations op, KeyType key, ValueType value) {
-        // === Step 1: Insert to NVM shared buffer ===
+    ErrorCode insertBuffered(std::shared_ptr<Node<KeyType, ValueType>>, 
+                         Operations op, KeyType key, ValueType value) 
+    {
+        // Insert into NVM shared buffer (may trigger flush and tree reorganization)
         ErrorCode res = insertToNVMSharedBuffer(op, key, value);
         if (res != ErrorCode::Success) return res;
 
-        // === Step 2: Track message-node mappings ===
+        // Re-fetch buffer target using the updated tree structure
+        auto node = findBufferTarget(key);
+
+        // Track message-node mappings
         auto& keyList = nodeMessageMap[node];
         if (std::find(keyList.begin(), keyList.end(), key) == keyList.end()) {
-        keyList.push_back(key);
+            keyList.push_back(key);
         }
 
         messageToNodeMap[key] = node;
 
-        // === Step 3: Increment frequency for LFU tracking ===
+        // Frequency tracking for LFU flush
         KeyType nodeKey = getNodeKey(node);
         nodeFrequency[nodeKey]++;
 
+        std::cout << "[DEBUG] insertBuffered(): Key " << key
+                << " buffered into node with keys: ";
+        for (auto k : node->keys) std::cout << k << " ";
+        std::cout << "\n";
+
         return ErrorCode::Success;
     }
-
 
     // Flush the least-frequently-used node
     ErrorCode flushLFUNode()
@@ -908,6 +918,25 @@ public:
         return res;
     }
 
+    std::shared_ptr<Node<KeyType, ValueType>> findBufferTarget(const KeyType& key) {
+        auto current = this->root;        
+        while (current && !current->isLeaf) {
+            size_t i = std::lower_bound(current->keys.begin(), current->keys.end(), key)
+                     - current->keys.begin();
+            if (i >= current->children.size()) break;
+            auto next = current->children[i];
+            if (next->isLeaf) return current; // buffer at current internal
+            current = next;
+        }
+        // std::cout << "[DEBUG] findBufferTarget(): Key " << key
+        //   << " -> target node with keys: ";
+        // for (auto k : current->keys) std::cout << k << " ";
+        // std::cout << "\n";
+
+        return this->root;  // fallback
+    }
+    
+
     // Flush buffer messages for a node down to its children
     ErrorCode flushBuffer(std::shared_ptr<Node<KeyType, ValueType>> node)
     {
@@ -926,8 +955,8 @@ public:
         for (const auto& key : keysToFlush)
         {
             // 1. Locate message in NVM shared buffer
-            TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
-            auto* rootPtr = D_RW(root);
+            TOID(SharedBufferRoot) nvmRoot = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+            auto* rootPtr = D_RW(nvmRoot);
             message* msgPtr = nullptr;
 
             for (int i = 0; i < rootPtr->count; ++i) {
@@ -954,9 +983,17 @@ public:
             auto child = node->children[idx];
 
             if (!child->isLeaf) {
-                // Internal child: buffer into it
-                insertBuffered(child, opType, msgKey, msgVal);
-            } else {
+                auto bufferTarget = findBufferTarget(msgKey);
+                insertBuffered(bufferTarget, opType, msgKey, msgVal);
+            
+                // Handle potential overflow of the internal node
+                if (bufferTarget->keys.size() >= m_nDegree) {
+                    auto parent = findParent(root, bufferTarget);
+                    ErrorCode result = splitInternal(parent, bufferTarget);
+                    if (result != ErrorCode::Success) return result;
+                }
+            }
+             else {
                 // Leaf: apply operation directly
                 auto it = std::find(child->keys.begin(), child->keys.end(), msgKey);
 
@@ -966,7 +1003,15 @@ public:
                         size_t pos = std::distance(child->keys.begin(), insertIt);
                         child->keys.insert(insertIt, msgKey);
                         child->values.insert(child->values.begin() + pos, msgVal);
+                        if (child->keys.size() >= m_nDegree) 
+                        {
+                            ErrorCode result = splitLeaf(node, child);
+                            if (result != ErrorCode::Success) return result;
+                            node = findParent(root, child);
+                            //node = root;
+                        }
                     }
+
                 } else if (opType == Operations::Update) {
                     if (it != child->keys.end()) {
                         size_t pos = std::distance(child->keys.begin(), it);
@@ -977,6 +1022,12 @@ public:
                         size_t pos = std::distance(child->keys.begin(), it);
                         child->keys.erase(it);
                         child->values.erase(child->values.begin() + pos);
+                        // Handle underflow if necessary
+                        if (child->keys.size() < (m_nDegree / 2)) 
+                        {
+                            ErrorCode result = handleUnderflow(node, child);
+                            if (result != ErrorCode::Success) return result;
+                        }
                     }
                 }
             }
@@ -1009,7 +1060,7 @@ public:
 
         return ErrorCode::Success;
     }
-
+    
     // === SPLIT LEAF ===
     ErrorCode splitLeaf(std::shared_ptr<Node<KeyType, ValueType>> parent,
         std::shared_ptr<Node<KeyType, ValueType>> leaf)
@@ -1118,13 +1169,18 @@ public:
         if (itMap != nodeMessageMap.end()) {
             std::vector<KeyType> moving;
             for (auto& k : itMap->second) {
-                if (k >= pivotKey) moving.push_back(k);
+                if (k >= pivotKey) {
+                    moving.push_back(k);
+                }
             }
             for (auto& k : moving) {
-                auto& refList = nodeMessageMap[internal];
-                refList.erase(std::remove(refList.begin(), refList.end(), k), refList.end());
+                auto& oldList = nodeMessageMap[internal];
+                oldList.erase(std::remove(oldList.begin(), oldList.end(), k), oldList.end());
+
                 nodeMessageMap[sibling].push_back(k);
                 messageToNodeMap[k] = sibling;
+
+                std::cout << "[DEBUG] Reassigned key " << k << " to sibling during internal split\n";
             }
         }
         return ErrorCode::Success;
@@ -1283,7 +1339,6 @@ public:
         }
     }
     
-
     std::string decodeMessageEntry(int index, const message& msg) {
         std::stringstream ss;
         ss << "[" << index << "] ";
@@ -1354,6 +1409,30 @@ public:
         }
 
         return std::nullopt;  // Not found
+    }
+
+    ErrorCode flushMostBufferedNode()
+    {
+        if (nodeMessageMap.empty()) return ErrorCode::Success;
+
+        auto maxIt = std::max_element(
+            nodeMessageMap.begin(), nodeMessageMap.end(),
+            [](const auto& a, const auto& b) {
+                return a.second.size() < b.second.size();
+            }
+        );
+
+        if (maxIt == nodeMessageMap.end()) {
+            std::cerr << "[FLUSH] No node to flush.\n";
+            return ErrorCode::Error;
+        }
+
+        auto nodeToFlush = maxIt->first;
+        std::cout << "[FLUSH] Flushing node with " << maxIt->second.size()
+                << " messages (first key: " << getNodeKey(nodeToFlush) << ")\n";
+
+        ErrorCode res = flushBuffer(nodeToFlush);
+        return res;
     }
 
 };
