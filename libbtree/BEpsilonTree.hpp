@@ -44,7 +44,6 @@ public:
 
     std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
     std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
-    std::unordered_map<KeyType, int> nodeFrequency;
 
     // DRAM read buffer
     std::unordered_map<KeyType, ValueType> readCache;
@@ -86,6 +85,9 @@ public:
             #else
             pmemPoolHandle = pmemobj_create(pmemPath.c_str(), LAYOUT_NAME,
                                             64 * 1024 * 1024, 0666);
+            TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
+            D_RW(auxRoot)->nodeFrequencyCount = 0;
+            pmemobj_persist(pmemPoolHandle, D_RW(auxRoot), sizeof(AuxiliaryMapsRoot));
             #endif
             if (!pmemPoolHandle) {
                 std::cerr << "[ERROR] Failed to create PMEM pool! Exiting.\n";
@@ -175,6 +177,33 @@ public:
 
 
 private:
+    void incrementNodeFrequency(uint64_t node_id) {
+        TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
+        auto* auxPtr = D_RW(auxRoot);
+
+        for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i) {
+            auto* entry = D_RW(auxPtr->nodeFrequencyMap[i]);
+            if (entry->node_id == node_id) {
+                entry->frequency += 1;
+                pmemobj_persist(pmemPoolHandle, entry, sizeof(NodeFrequencyEntry));
+                return;
+            }
+        }
+
+        if (auxPtr->nodeFrequencyCount < 128) {
+            TOID(NodeFrequencyEntry) newEntry;
+            if (pmemobj_alloc(pmemPoolHandle, &newEntry.oid, sizeof(NodeFrequencyEntry), 0, nullptr, nullptr) == 0) {
+                D_RW(newEntry)->node_id = node_id;
+                D_RW(newEntry)->frequency = 1;
+                pmemobj_persist(pmemPoolHandle, D_RW(newEntry), sizeof(NodeFrequencyEntry));
+                auxPtr->nodeFrequencyMap[auxPtr->nodeFrequencyCount++] = newEntry;
+                pmemobj_persist(pmemPoolHandle, auxPtr, sizeof(AuxiliaryMapsRoot));
+            }
+        }
+    }
+
+
+
     ErrorCode insertToNVMSharedBuffer(Operations op, const KeyType& key, const ValueType& value = ValueType{}) 
     {
         if (!pmemPoolHandle) return ErrorCode::Error;
@@ -878,7 +907,7 @@ public:
 
         // Frequency tracking for LFU flush
         KeyType nodeKey = getNodeKey(node);
-        nodeFrequency[nodeKey]++;
+        incrementNodeFrequency(static_cast<uint64_t>(nodeKey));
 
         std::cout << "[DEBUG] insertBuffered(): Key " << key
                 << " buffered into node with keys: ";
@@ -891,41 +920,40 @@ public:
     // Flush the least-frequently-used node
     ErrorCode flushLFUNode()
     {
-        if (nodeMessageMap.empty()) return ErrorCode::Success;
+        TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
+        auto* auxPtr = D_RW(auxRoot);
 
-        // 1) find node with minimal frequency
-        auto minIt = std::min_element(
-            nodeFrequency.begin(), nodeFrequency.end(),
-            [](auto& a, auto& b) { return a.second < b.second; }
-        );
-        if (minIt == nodeFrequency.end())
-            return ErrorCode::Error;
+        if (auxPtr->nodeFrequencyCount == 0 || nodeMessageMap.empty())
+            return ErrorCode::Success;
 
-        KeyType lfuKey = minIt->first;
+        // Find node_id with minimum frequency
+        uint64_t minFreqNodeId = 0;
+        int minFreq = INT32_MAX;
 
-        // 2) find matching node in nodeMessageMap
+        for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i) {
+            auto* entry = D_RW(auxPtr->nodeFrequencyMap[i]);
+            if (entry->frequency < minFreq) {
+                minFreq = entry->frequency;
+                minFreqNodeId = entry->node_id;
+            }
+        }
+
+        // Find matching node in nodeMessageMap using node_id
         auto nodeIt = std::find_if(nodeMessageMap.begin(), nodeMessageMap.end(),
             [&](auto& pair) {
-                auto candidateNode = pair.first;
-                if (candidateNode->keys.empty()) return false;
-                // match by the first key in that node
-                return (candidateNode->keys[0] == lfuKey);
-            }
-        );
+                auto node = pair.first;
+                return !node->keys.empty() && static_cast<uint64_t>(node->keys[0]) == minFreqNodeId;
+            });
 
         if (nodeIt == nodeMessageMap.end())
             return ErrorCode::Error;
 
         auto nodeToFlush = nodeIt->first;
 
-        // 3) Flush
         ErrorCode res = flushBuffer(nodeToFlush);
-        if (res == ErrorCode::Success) {
-            nodeFrequency.erase(lfuKey);
-        }
-
         return res;
     }
+
 
     std::shared_ptr<Node<KeyType, ValueType>> findBufferTarget(const KeyType& key) {
         auto current = this->root;        
@@ -1316,17 +1344,6 @@ public:
         }
     }
 
-    void printNodeFrequency() const {
-        std::cout << "\n--- [DEBUG] Node Frequency ---\n";
-        if (nodeFrequency.empty()) {
-            std::cout << "(empty)\n";
-            return;
-        }
-        for (auto& [k, freq] : nodeFrequency) {
-            std::cout << "NodeKey[" << k << "] => freq=" << freq << "\n";
-        }
-    }
-
     void printReadCache() const {
         std::cout << "\n--- [DEBUG] DRAM Read Cache ---\n";
         if (readCache.empty()) {
@@ -1347,6 +1364,18 @@ public:
             std::cout << decodeMessageEntry(i, *msg) << "\n";
         }
     }
+
+    void printNVMNodeFrequency() {
+        TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
+        auto* auxPtr = D_RO(auxRoot);
+    
+        std::cout << "\n--- [DEBUG] Persistent Node Frequency ---\n";
+        for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i) {
+            auto* entry = D_RO(auxPtr->nodeFrequencyMap[i]);
+            std::cout << "NodeID[" << entry->node_id << "] => freq=" << entry->frequency << "\n";
+        }
+    }
+    
     
     std::string decodeMessageEntry(int index, const message& msg) {
         std::stringstream ss;

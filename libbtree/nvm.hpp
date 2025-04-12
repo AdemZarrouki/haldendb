@@ -2,30 +2,43 @@
 #define NVM_LAYOUT_HPP
 
 #include <libpmemobj.h>
-#include <cstdint>   // for uint8_t, etc.
+#include <cstdint>
 
-// 1) Forward-declare the structs
 struct message;
 struct SharedBufferRoot;
+struct KeyList;
+struct NodeMessageEntry;
+struct MessageToNodeEntry;
+struct NodeFrequencyEntry;
+struct AuxiliaryMapsRoot;
 
-// 2) Define the layout macros *before* using the structs
+
 #ifdef _WIN32
 #define LAYOUT_NAME L"bepsilon_layout"
 #else
 #define LAYOUT_NAME "bepsilon_layout"
 #endif
 
+
 POBJ_LAYOUT_BEGIN(bepsilon_layout);
 POBJ_LAYOUT_ROOT(bepsilon_layout, SharedBufferRoot);
 POBJ_LAYOUT_TOID(bepsilon_layout, message);
+POBJ_LAYOUT_TOID(bepsilon_layout, KeyList);
+POBJ_LAYOUT_TOID(bepsilon_layout, NodeMessageEntry);
+POBJ_LAYOUT_TOID(bepsilon_layout, MessageToNodeEntry);
+POBJ_LAYOUT_TOID(bepsilon_layout, NodeFrequencyEntry);
+POBJ_LAYOUT_TOID(bepsilon_layout, AuxiliaryMapsRoot);
 POBJ_LAYOUT_END(bepsilon_layout);
 
-// 3) Now define your constants
+
 #define MAX_NVM_MESSAGES 4
 #define MAX_KEY_SIZE 64
 #define MAX_VAL_SIZE 64
+#define MAX_KEYS_PER_NODE 32
+#define MAX_NODES 64
+#define MAX_MESSAGES 128
 
-// 4) Define the actual structs
+
 struct message {
     uint8_t opCode;
     uint32_t key_size;
@@ -35,9 +48,39 @@ struct message {
 };
 
 struct SharedBufferRoot {
-    // typed OID from the macro above
     TOID(message) messages[MAX_NVM_MESSAGES];
     int count;
 };
 
-#endif // NVM_LAYOUT_HPP
+struct KeyList {
+    int count;
+    uint64_t keys[MAX_KEYS_PER_NODE];
+};
+
+struct NodeMessageEntry {
+    uint64_t node_id;
+    KeyList key_list;
+};
+
+struct MessageToNodeEntry {
+    uint64_t key;
+    uint64_t node_id;
+};
+
+struct NodeFrequencyEntry {
+    uint64_t node_id;
+    int frequency;
+};
+
+struct AuxiliaryMapsRoot {
+    TOID(NodeMessageEntry) nodeMessageMap[MAX_NODES];
+    int nodeMessageMapCount;
+
+    TOID(MessageToNodeEntry) messageToNodeMap[MAX_MESSAGES];
+    int messageToNodeMapCount;
+
+    TOID(NodeFrequencyEntry) nodeFrequencyMap[MAX_NODES];
+    int nodeFrequencyCount;
+};
+
+#endif
