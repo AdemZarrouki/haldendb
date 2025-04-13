@@ -27,23 +27,18 @@
 
 using namespace std;
 
-
-
 template <typename KeyType, typename ValueType>
 class BEpsilonTree
 {
 public:
     std::shared_ptr<Node<KeyType, ValueType>> root;
-    PMEMobjpool* pmemPoolHandle = nullptr;  // NVM pool for shared buffer
+    PMEMobjpool* pmemPoolHandle = nullptr;  // NVM pool
 
     uint32_t m_nDegree;
     std::string logFilename = getPlatformPath("nvm_tree_test1.log");
     int opCounter = 0;
     int checkpointFrequency = 5;
     bool isReplaying = false;
-
-    std::unordered_map<std::shared_ptr<Node<KeyType, ValueType>>, std::vector<KeyType>> nodeMessageMap;
-    std::unordered_map<KeyType, std::shared_ptr<Node<KeyType, ValueType>>> messageToNodeMap;
 
     // DRAM read buffer
     std::unordered_map<KeyType, ValueType> readCache;
@@ -71,75 +66,8 @@ public:
         const std::string pmemPath = getPlatformPath("shared_buffer_pool.pmem");
 
         std::cout << "[DEBUG] Trying to open PMEM pool at: " << pmemPath << "\n";
-        #ifdef _WIN32
-        std::wstring pmemPathW(pmemPath.begin(), pmemPath.end());
-        pmemPoolHandle = pmemobj_openW(pmemPathW.c_str(), LAYOUT_NAME);
-        #else
-        pmemPoolHandle = pmemobj_open(pmemPath.c_str(), LAYOUT_NAME);
-        #endif
-        if (!pmemPoolHandle) {
-            std::cout << "[DEBUG] Pool not found. Creating new PMEM pool...\n";
-            #ifdef _WIN32
-            std::wstring pmemPathW(pmemPath.begin(), pmemPath.end());
-            pmemPoolHandle = pmemobj_createW(pmemPathW.c_str(), LAYOUT_NAME, 64 * 1024 * 1024, 0666);
-            #else
-            pmemPoolHandle = pmemobj_create(pmemPath.c_str(), LAYOUT_NAME,
-                                            64 * 1024 * 1024, 0666);
-            TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
-            D_RW(auxRoot)->nodeFrequencyCount = 0;
-            pmemobj_persist(pmemPoolHandle, D_RW(auxRoot), sizeof(AuxiliaryMapsRoot));
-            #endif
-            if (!pmemPoolHandle) {
-                std::cerr << "[ERROR] Failed to create PMEM pool! Exiting.\n";
-                perror("pmemobj_create");
-                exit(1);
-            } else {
-                std::cout << "[NVM] New PMEM pool created successfully.\n";
-            }
-        } else {
-            std::cout << "[NVM] Existing PMEM pool opened successfully.\n";
-        }
-
-        // === Replay Binary WAL if present ===
-        std::ifstream walBin(getPlatformPath("nvm_tree_bin.wal"), std::ios::binary);
-        if (walBin.is_open()) {
-            isReplaying = true;
-            while (!walBin.eof()) {
-                uint8_t opCode;
-                KeyType key;
-                ValueType value;
-
-                walBin.read(reinterpret_cast<char*>(&opCode), sizeof(opCode));
-                if (walBin.eof()) break;  // avoid partial read
-
-                walBin.read(reinterpret_cast<char*>(&key), sizeof(KeyType));
-                Operations op = static_cast<Operations>(opCode);
-
-                if (op == Operations::Insert || op == Operations::Update) {
-                    walBin.read(reinterpret_cast<char*>(&value), sizeof(ValueType));
-                }
-
-                switch (op) {
-                case Operations::Insert:
-                    insert(key, value);
-                    break;
-                case Operations::Update:
-                    update(key, value);
-                    break;
-                case Operations::Delete:
-                    remove(key);
-                    break;
-                case Operations::Upsert:
-                    upsert(key, value);
-                    break;
-                default:
-                    std::cerr << "[WARN] Unsupported op in binary WAL: " << static_cast<int>(op) << "\n";
-                    break;
-                }
-            }
-            walBin.close();
-        }
-        isReplaying = false;
+        initializePMEMPool(pmemPath);
+        replayBinaryWAL();
     }
 
     ~BEpsilonTree()
@@ -177,8 +105,97 @@ public:
 
 
 private:
+    void replayBinaryWAL() {
+        const std::string walPath = getPlatformPath("nvm_tree_bin.wal");
+        std::ifstream walBin(walPath, std::ios::binary);
+        if (!walBin.is_open()) {
+            std::cout << "[WAL] No WAL file to replay.\n";
+            return;
+        }
+
+        std::cout << "[WAL] Replaying binary WAL from: " << walPath << "\n";
+        isReplaying = true;
+
+        while (!walBin.eof()) {
+            uint8_t opCode;
+            KeyType key;
+            ValueType value;
+
+            walBin.read(reinterpret_cast<char*>(&opCode), sizeof(opCode));
+            if (walBin.eof()) break;
+
+            walBin.read(reinterpret_cast<char*>(&key), sizeof(KeyType));
+            Operations op = static_cast<Operations>(opCode);
+
+            if (op == Operations::Insert || op == Operations::Update) {
+                walBin.read(reinterpret_cast<char*>(&value), sizeof(ValueType));
+            }
+
+            switch (op) {
+            case Operations::Insert:
+                insert(key, value);
+                break;
+            case Operations::Update:
+                update(key, value);
+                break;
+            case Operations::Delete:
+                remove(key);
+                break;
+            case Operations::Upsert:
+                upsert(key, value);
+                break;
+            default:
+                std::cerr << "[WARN] Unknown or unhandled WAL op: " << static_cast<int>(op) << "\n";
+                break;
+            }
+        }
+
+        walBin.close();
+        isReplaying = false;
+    }
+
+    void initializePMEMPool(const std::string& pmemPath) {
+        #ifdef _WIN32
+        std::wstring pmemPathW(pmemPath.begin(), pmemPath.end());
+        pmemPoolHandle = pmemobj_openW(pmemPathW.c_str(), LAYOUT_NAME);
+        #else
+        pmemPoolHandle = pmemobj_open(pmemPath.c_str(), LAYOUT_NAME);
+        #endif
+        
+        if (!pmemPoolHandle) {
+            std::cout << "[DEBUG] Pool not found. Creating new PMEM pool...\n";
+            #ifdef _WIN32
+            pmemPoolHandle = pmemobj_createW(pmemPathW.c_str(), LAYOUT_NAME, 64 * 1024 * 1024, 0666);
+            #else
+            pmemPoolHandle = pmemobj_create(pmemPath.c_str(), LAYOUT_NAME, 64 * 1024 * 1024, 0666);
+            #endif
+            if (!pmemPoolHandle) {
+                std::cerr << "[ERROR] Failed to create PMEM pool! Exiting.\n";
+                perror("pmemobj_create");
+                exit(1);
+            }
+
+            TOID(PMEMRoot) root = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+            auto* ptr = D_RW(root);
+
+            // Initialize buffer + maps
+            ptr->messageCount = 0;
+            for (int i = 0; i < MAX_NVM_MESSAGES; ++i) {
+                ptr->messages[i] = TOID_NULL(message);
+            }
+            ptr->nodeFrequencyCount = 0;
+            ptr->nodeMessageMapCount = 0;
+            ptr->messageToNodeMapCount = 0;
+
+            pmemobj_persist(pmemPoolHandle, ptr, sizeof(PMEMRoot));
+            std::cout << "[NVM] New PMEM pool created successfully.\n";
+        } else {
+            std::cout << "[NVM] Existing PMEM pool opened successfully.\n";
+        }
+    }
+    
     void incrementNodeFrequency(uint64_t node_id) {
-        TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
         auto* auxPtr = D_RW(auxRoot);
 
         for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i) {
@@ -197,115 +214,114 @@ private:
                 D_RW(newEntry)->frequency = 1;
                 pmemobj_persist(pmemPoolHandle, D_RW(newEntry), sizeof(NodeFrequencyEntry));
                 auxPtr->nodeFrequencyMap[auxPtr->nodeFrequencyCount++] = newEntry;
-                pmemobj_persist(pmemPoolHandle, auxPtr, sizeof(AuxiliaryMapsRoot));
+                pmemobj_persist(pmemPoolHandle, auxPtr, sizeof(PMEMRoot)); 
             }
         }
     }
 
-
-
     ErrorCode insertToNVMSharedBuffer(Operations op, const KeyType& key, const ValueType& value = ValueType{}) 
-    {
-        if (!pmemPoolHandle) return ErrorCode::Error;
+{
+    if (!pmemPoolHandle) return ErrorCode::Error;
 
-        TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
-        auto* rootPtr = D_RW(root);
+    TOID(PMEMRoot) root = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+    auto* rootPtr = D_RW(root);
 
-        // Search for existing message on the same key
-        int existingIndex = -1;
-        for (int i = 0; i < rootPtr->count; ++i) {
-            message* msgPtr = D_RW(rootPtr->messages[i]);
-            if (msgPtr->key_size == sizeof(KeyType) &&
-                std::memcmp(msgPtr->key_data, &key, sizeof(KeyType)) == 0) {
-                existingIndex = i;
-                break;
-            }
+    // Search for existing message on the same key
+    int existingIndex = -1;
+    for (int i = 0; i < rootPtr->messageCount; ++i) {
+        message* msgPtr = D_RW(rootPtr->messages[i]);
+        if (msgPtr->key_size == sizeof(KeyType) &&
+            std::memcmp(msgPtr->key_data, &key, sizeof(KeyType)) == 0) {
+            existingIndex = i;
+            break;
         }
+    }
 
-        // Coalescing logic
-        if (existingIndex != -1) {
-            message* msgPtr = D_RW(rootPtr->messages[existingIndex]);
-            Operations prevOp = static_cast<Operations>(msgPtr->opCode);
+    // === COALESCING LOGIC ===
+    if (existingIndex != -1) {
+        message* msgPtr = D_RW(rootPtr->messages[existingIndex]);
+        Operations prevOp = static_cast<Operations>(msgPtr->opCode);
 
-            switch (prevOp) {
-                case Operations::Insert:
-                    if (op == Operations::Update) {
-                        msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
-                        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                        return ErrorCode::Success;
-                    } else if (op == Operations::Delete) {
-                        for (int j = existingIndex + 1; j < rootPtr->count; ++j)
-                            rootPtr->messages[j - 1] = rootPtr->messages[j];
-                        rootPtr->count--;
-                        pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
-                        return ErrorCode::Success;
-                    }
-                    break;
-                case Operations::Update:
-                    if (op == Operations::Update) {
-                        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                        return ErrorCode::Success;
-                    } else if (op == Operations::Delete) {
-                        msgPtr->opCode = static_cast<uint8_t>(Operations::Delete);
-                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                        return ErrorCode::Success;
-                    }
-                    break;
-                case Operations::Delete:
-                    if (op == Operations::Insert) {
-                        msgPtr->opCode = static_cast<uint8_t>(Operations::Insert);
-                        std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-                        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
-                        return ErrorCode::Success;
-                    }
-                    break;
-                default:
-                    break;
+        if (prevOp == Operations::Insert && op == Operations::Delete) {
+            // Remove message
+            for (int j = existingIndex + 1; j < rootPtr->messageCount; ++j)
+                rootPtr->messages[j - 1] = rootPtr->messages[j];
+            rootPtr->messageCount--;
+            pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(PMEMRoot));
+
+            // Clean metadata
+            auto nodeIdOpt = lookupNodeIdForKey(static_cast<uint64_t>(key));
+            if (nodeIdOpt.has_value()) {
+                removeKeyFromNodeMessageMap(nodeIdOpt.value(), key);
             }
-
-            // Fallback: overwrite message
-            msgPtr->opCode = static_cast<uint8_t>(op);
-            std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
-            pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+            removeKeyFromMessageToNodeMap(static_cast<uint64_t>(key));
             return ErrorCode::Success;
         }
 
-        // Flush if full
-        while (rootPtr->count >= MAX_NVM_MESSAGES) {
-            std::cout << "[NVM] Shared buffer full, flushing...\n";
-            auto flushResult = flushMostBufferedNode();
-            if (flushResult != ErrorCode::Success) {
-                std::cerr << "[ERROR] Failed to flush any node. Shared buffer stuck.\n";
-                return ErrorCode::Error;
-            }
-
-            // Recompute rootPtr in case root was replaced during flush/split
-            root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
-            rootPtr = D_RW(root);
+        // Regular overwrite (Insert/Update)
+        msgPtr->opCode = static_cast<uint8_t>(op);
+        msgPtr->key_size = sizeof(KeyType);
+        msgPtr->val_size = (op == Operations::Delete) ? 0 : sizeof(ValueType);
+        std::memcpy(msgPtr->key_data, &key, sizeof(KeyType));
+        if (op != Operations::Delete) {
+            std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
         }
-
-        // Insert new message
-        TOID(message) msg;
-        if (pmemobj_alloc(pmemPoolHandle, &msg.oid, sizeof(message), 0, nullptr, nullptr) != 0) {
-            std::cerr << "[NVM] Failed to allocate message in PMEM!\n";
-            return ErrorCode::Error;
-        }
-
-        D_RW(msg)->opCode = static_cast<uint8_t>(op);
-        D_RW(msg)->key_size = sizeof(KeyType);
-        D_RW(msg)->val_size = sizeof(ValueType);
-        std::memcpy(D_RW(msg)->key_data, &key, sizeof(KeyType));
-        std::memcpy(D_RW(msg)->val_data, &value, sizeof(ValueType));
-        pmemobj_persist(pmemPoolHandle, D_RW(msg), sizeof(message));
-
-        rootPtr->messages[rootPtr->count++] = msg;
-        pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
-
+        pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
         return ErrorCode::Success;
     }
 
+    // === HANDLE INSERTION OF NEW DELETE ===
+    if (op == Operations::Delete) {
+        // Message does not exist, but key might still be in maps → clean stale metadata
+        auto nodeIdOpt = lookupNodeIdForKey(static_cast<uint64_t>(key));
+        if (nodeIdOpt.has_value()) {
+            removeKeyFromNodeMessageMap(nodeIdOpt.value(), key);
+        }
+        removeKeyFromMessageToNodeMap(static_cast<uint64_t>(key));
+        return ErrorCode::Success;  // nothing more to store
+    }
+
+    // === FLUSH IF FULL ===
+    while (rootPtr->messageCount >= MAX_NVM_MESSAGES) {
+        auto flushResult = flushMostBufferedNode();
+        if (flushResult != ErrorCode::Success) {
+            std::cerr << "[ERROR] Failed to flush any node. Shared buffer stuck.\n";
+            return ErrorCode::Error;
+        }
+
+        root = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        rootPtr = D_RW(root);
+    }
+
+
+    auto nodeIdOpt = lookupNodeIdForKey(static_cast<uint64_t>(key));
+    if (nodeIdOpt.has_value()) {
+        removeKeyFromNodeMessageMap(nodeIdOpt.value(), key);
+    }
+    removeKeyFromMessageToNodeMap(static_cast<uint64_t>(key));
+
+    // === ALLOCATE NEW MESSAGE ===
+    TOID(message) msg;
+    int alloc_status = pmemobj_alloc(pmemPoolHandle, &msg.oid, sizeof(message), 0, nullptr, nullptr);
+    if (alloc_status != 0 || TOID_IS_NULL(msg)) {
+        std::cerr << "[NVM] Failed to allocate message in PMEM (status = " << alloc_status << ").\n";
+        return ErrorCode::Error;
+    }
+
+    auto* msgPtr = D_RW(msg);
+    msgPtr->opCode = static_cast<uint8_t>(op);
+    msgPtr->key_size = sizeof(KeyType);
+    msgPtr->val_size = sizeof(ValueType);
+    std::memcpy(msgPtr->key_data, &key, sizeof(KeyType));
+    std::memcpy(msgPtr->val_data, &value, sizeof(ValueType));
+    pmemobj_persist(pmemPoolHandle, msgPtr, sizeof(message));
+
+    rootPtr->messages[rootPtr->messageCount++] = msg;
+    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(PMEMRoot));
+    return ErrorCode::Success;
+}
+
+    
     // Simple LRU read-cache update
     void updateReadCache(const KeyType& key, const ValueType& value) {
         // If already in cache -> move to front (MRU)
@@ -362,7 +378,8 @@ private:
         std::ofstream clearLog(logFilename, std::ios::trunc);
         clearLog.close();
 
-        std::cout << "[CHECKPOINT] Tree saved, WAL cleared, backup created: " << backupFilename << "\n";
+        // todo
+        // std::cout << "[CHECKPOINT] Tree saved, WAL cleared, backup created: " << backupFilename << "\n";
     }
 
     void maybeCheckpoint() {
@@ -510,6 +527,7 @@ private:
 
 public:
     // === DELETE OP ===
+
     ErrorCode remove(KeyType key) {
         if (!root)
             return ErrorCode::KeyDoesNotExist; // Empty tree
@@ -648,15 +666,15 @@ public:
         parent->children.erase(parent->children.begin() + separatorIndex + 1);
 
         // Reassign messages
-        auto it = nodeMessageMap.find(right);
-        if (it != nodeMessageMap.end()) {
-            for (auto& k : it->second) {
-                nodeMessageMap[left].push_back(k);
-                messageToNodeMap[k] = left;
-            }
-            nodeMessageMap.erase(it);
-        }
+        uint64_t right_id = static_cast<uint64_t>(getNodeKey(right));
+        uint64_t left_id = static_cast<uint64_t>(getNodeKey(left));
 
+        auto keys = getBufferedKeysForNode(right_id);
+        for (auto& k : keys) {
+            moveBufferedKeyBetweenNodes(right_id, left_id, k);
+            insertToMessageToNodeMap(static_cast<uint64_t>(k), left_id);
+
+        }
         right.reset();
     }
 
@@ -794,10 +812,10 @@ public:
     Done:
         // overlay messages from NVM shared buffer
         if (pmemPoolHandle) {
-            TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+            TOID(PMEMRoot) root = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
             auto* rootPtr = D_RO(root);
 
-            for (int i = 0; i < rootPtr->count; ++i) {
+            for (int i = 0; i < rootPtr->messageCount; ++i) {
                 auto* msg = D_RO(rootPtr->messages[i]);
                 if (msg->key_size != sizeof(KeyType)) continue;
 
@@ -898,61 +916,55 @@ public:
         auto node = findBufferTarget(key);
 
         // Track message-node mappings
-        auto& keyList = nodeMessageMap[node];
-        if (std::find(keyList.begin(), keyList.end(), key) == keyList.end()) {
-            keyList.push_back(key);
+        uint64_t node_id = static_cast<uint64_t>(getNodeKey(node));
+        if (op != Operations::Delete) {
+            addKeyToNodeMessageMap(node_id, key);
+            insertToMessageToNodeMap(static_cast<uint64_t>(key), node_id);
         }
 
-        messageToNodeMap[key] = node;
 
         // Frequency tracking for LFU flush
         KeyType nodeKey = getNodeKey(node);
         incrementNodeFrequency(static_cast<uint64_t>(nodeKey));
-
-        std::cout << "[DEBUG] insertBuffered(): Key " << key
-                << " buffered into node with keys: ";
-        for (auto k : node->keys) std::cout << k << " ";
-        std::cout << "\n";
-
         return ErrorCode::Success;
     }
 
     // Flush the least-frequently-used node
-    ErrorCode flushLFUNode()
-    {
-        TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
-        auto* auxPtr = D_RW(auxRoot);
+    // ErrorCode flushLFUNode()
+    // {
+    //     TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+    //     auto* auxPtr = D_RW(auxRoot);
 
-        if (auxPtr->nodeFrequencyCount == 0 || nodeMessageMap.empty())
-            return ErrorCode::Success;
+    //     if (auxPtr->nodeFrequencyCount == 0 || nodeMessageMap.empty())
+    //         return ErrorCode::Success;
 
-        // Find node_id with minimum frequency
-        uint64_t minFreqNodeId = 0;
-        int minFreq = INT32_MAX;
+    //     // Find node_id with minimum frequency
+    //     uint64_t minFreqNodeId = 0;
+    //     int minFreq = INT32_MAX;
 
-        for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i) {
-            auto* entry = D_RW(auxPtr->nodeFrequencyMap[i]);
-            if (entry->frequency < minFreq) {
-                minFreq = entry->frequency;
-                minFreqNodeId = entry->node_id;
-            }
-        }
+    //     for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i) {
+    //         auto* entry = D_RW(auxPtr->nodeFrequencyMap[i]);
+    //         if (entry->frequency < minFreq) {
+    //             minFreq = entry->frequency;
+    //             minFreqNodeId = entry->node_id;
+    //         }
+    //     }
 
-        // Find matching node in nodeMessageMap using node_id
-        auto nodeIt = std::find_if(nodeMessageMap.begin(), nodeMessageMap.end(),
-            [&](auto& pair) {
-                auto node = pair.first;
-                return !node->keys.empty() && static_cast<uint64_t>(node->keys[0]) == minFreqNodeId;
-            });
+    //     // Find matching node in nodeMessageMap using node_id
+    //     auto nodeIt = std::find_if(nodeMessageMap.begin(), nodeMessageMap.end(),
+    //         [&](auto& pair) {
+    //             auto node = pair.first;
+    //             return !node->keys.empty() && static_cast<uint64_t>(node->keys[0]) == minFreqNodeId;
+    //         });
 
-        if (nodeIt == nodeMessageMap.end())
-            return ErrorCode::Error;
+    //     if (nodeIt == nodeMessageMap.end())
+    //         return ErrorCode::Error;
 
-        auto nodeToFlush = nodeIt->first;
+    //     auto nodeToFlush = nodeIt->first;
 
-        ErrorCode res = flushBuffer(nodeToFlush);
-        return res;
-    }
+    //     ErrorCode res = flushBuffer(nodeToFlush);
+    //     return res;
+    // }
 
 
     std::shared_ptr<Node<KeyType, ValueType>> findBufferTarget(const KeyType& key) {
@@ -965,11 +977,6 @@ public:
             if (next->isLeaf) return current; // buffer at current internal
             current = next;
         }
-        // std::cout << "[DEBUG] findBufferTarget(): Key " << key
-        //   << " -> target node with keys: ";
-        // for (auto k : current->keys) std::cout << k << " ";
-        // std::cout << "\n";
-
         return this->root;  // fallback
     }
     
@@ -979,12 +986,10 @@ public:
     {
         if (node->isLeaf) return ErrorCode::Success;
 
-        auto it = nodeMessageMap.find(node);
-        if (it == nodeMessageMap.end())
-            return ErrorCode::Success;
+        uint64_t node_id = static_cast<uint64_t>(getNodeKey(node));
+        auto keysToFlush = getBufferedKeysForNode(node_id);
+        removeKeyFromNodeMessageMap(node_id);  // clear all keys at once if needed
 
-        auto keysToFlush = it->second;
-        nodeMessageMap.erase(it);
 
         // Sort & unique keys
         std::sort(keysToFlush.begin(), keysToFlush.end());
@@ -992,11 +997,12 @@ public:
         for (const auto& key : keysToFlush)
         {
             // 1. Locate message in NVM shared buffer
-            TOID(SharedBufferRoot) nvmRoot = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+            TOID(PMEMRoot) nvmRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
             auto* rootPtr = D_RW(nvmRoot);
+            // auto* rootReadPtr = D_RO(nvmRoot);
             message* msgPtr = nullptr;
 
-            for (int i = 0; i < rootPtr->count; ++i) {
+            for (int i = 0; i < rootPtr->messageCount; ++i) {
                 auto* candidate = D_RW(rootPtr->messages[i]);
                 if (candidate->key_size == sizeof(KeyType) &&
                     std::memcmp(candidate->key_data, &key, sizeof(KeyType)) == 0) {
@@ -1070,26 +1076,22 @@ public:
             }
 
             // 3. Clean up buffer references
-            auto msgNodeIt = messageToNodeMap.find(key);
-            if (msgNodeIt != messageToNodeMap.end())
-                messageToNodeMap.erase(msgNodeIt);
-
-            auto& keyVec = nodeMessageMap[node];
-            keyVec.erase(std::remove(keyVec.begin(), keyVec.end(), key), keyVec.end());
+            removeKeyFromMessageToNodeMap(static_cast<uint64_t>(key));
+            removeKeyFromNodeMessageMap(node_id, key);
 
             // 4. Remove from NVM shared buffer (compact array)
-            for (int i = 0; i < rootPtr->count; ++i) {
+            for (int i = 0; i < rootPtr->messageCount; ++i) {
                 auto* candidate = D_RW(rootPtr->messages[i]);
                 if (candidate == msgPtr) {
                     // Free memory
                     pmemobj_free(&rootPtr->messages[i].oid);
 
                     // Shift all later entries
-                    for (int j = i + 1; j < rootPtr->count; ++j) {
+                    for (int j = i + 1; j < rootPtr->messageCount; ++j) {
                         rootPtr->messages[j - 1] = rootPtr->messages[j];
                     }
-                    rootPtr->count--;
-                    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(SharedBufferRoot));
+                    rootPtr->messageCount--;
+                    pmemobj_persist(pmemPoolHandle, rootPtr, sizeof(PMEMRoot));
                     break;
                 }
             }
@@ -1120,21 +1122,14 @@ public:
 
         // Reassign any buffered messages that belong >= pivotKey to sibling
         {
-            auto itMap = nodeMessageMap.find(leaf);
-            if (itMap != nodeMessageMap.end()) {
-                // gather keys that must move
-                std::vector<KeyType> moving;
-                for (auto& k : itMap->second) {
-                    if (k >= pivotKey) {
-                        moving.push_back(k);
-                    }
-                }
-                // remove from leaf's list, add to sibling
-                for (auto& k : moving) {
-                    auto& refList = nodeMessageMap[leaf];
-                    refList.erase(std::remove(refList.begin(), refList.end(), k), refList.end());
-                    nodeMessageMap[sibling].push_back(k);
-                    messageToNodeMap[k] = sibling;
+            uint64_t leaf_id = static_cast<uint64_t>(getNodeKey(leaf));
+            uint64_t sibling_id = static_cast<uint64_t>(getNodeKey(sibling));
+
+            auto keys = getBufferedKeysForNode(leaf_id);
+            for (auto& k : keys) {
+                if (k >= pivotKey) {
+                    moveBufferedKeyBetweenNodes(leaf_id, sibling_id, k);
+                    insertToMessageToNodeMap(static_cast<uint64_t>(k), sibling_id);
                 }
             }
         }
@@ -1202,21 +1197,14 @@ public:
         }
 
         // Reassign buffered messages from 'internal' to 'sibling' if >= pivotKey
-        auto itMap = nodeMessageMap.find(internal);
-        if (itMap != nodeMessageMap.end()) {
-            std::vector<KeyType> moving;
-            for (auto& k : itMap->second) {
-                if (k >= pivotKey) {
-                    moving.push_back(k);
-                }
-            }
-            for (auto& k : moving) {
-                auto& oldList = nodeMessageMap[internal];
-                oldList.erase(std::remove(oldList.begin(), oldList.end(), k), oldList.end());
+        uint64_t from_id = static_cast<uint64_t>(getNodeKey(internal));
+        uint64_t to_id = static_cast<uint64_t>(getNodeKey(sibling));
 
-                nodeMessageMap[sibling].push_back(k);
-                messageToNodeMap[k] = sibling;
-
+        auto keys = getBufferedKeysForNode(from_id);
+        for (auto& k : keys) {
+            if (k >= pivotKey) {
+                moveBufferedKeyBetweenNodes(from_id, to_id, k);
+                insertToMessageToNodeMap(static_cast<uint64_t>(k), to_id);
                 std::cout << "[DEBUG] Reassigned key " << k << " to sibling during internal split\n";
             }
         }
@@ -1310,39 +1298,23 @@ public:
         }
     }
 
-    void printNodeMessageMap() const {
-        std::cout << "\n--- [DEBUG] nodeMessageMap Contents ---\n";
-        if (nodeMessageMap.empty()) {
+    
+    void printNVMMessageToNodeMap() const {
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RO(auxRoot);
+
+        std::cout << "\n--- [DEBUG] Persistent messageToNodeMap ---\n";
+        if (auxPtr->messageToNodeMapCount == 0) {
             std::cout << "(empty)\n";
             return;
         }
-        for (auto& [node, keys] : nodeMessageMap) {
-            std::cout << "Node(";
-            for (auto& nk : node->keys) {
-                std::cout << nk << " ";
-            }
-            std::cout << ") => buffered keys: ";
-            for (auto& kk : keys) {
-                std::cout << kk << " ";
-            }
-            std::cout << "\n";
+
+        for (int i = 0; i < auxPtr->messageToNodeMapCount; ++i) {
+            auto* entry = D_RO(auxPtr->messageToNodeMap[i]);
+            std::cout << "Key[" << entry->key << "] => NodeID[" << entry->node_id << "]\n";
         }
     }
 
-    void printMessageToNodeMap() const {
-        std::cout << "\n--- [DEBUG] messageToNodeMap Contents ---\n";
-        if (messageToNodeMap.empty()) {
-            std::cout << "(empty)\n";
-            return;
-        }
-        for (auto& [k, n] : messageToNodeMap) {
-            if (n) {
-                std::cout << "Key " << k << " belongs to Node(";
-                for (auto& x : n->keys) std::cout << x << " ";
-                std::cout << ")\n";
-            }
-        }
-    }
 
     void printReadCache() const {
         std::cout << "\n--- [DEBUG] DRAM Read Cache ---\n";
@@ -1356,18 +1328,17 @@ public:
     }
 
     void printNVMSharedBuffer() {
-        TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+        TOID(PMEMRoot) root = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
         auto* rootPtr = D_RO(root);
-        std::cout << "\n[NVM BUFFER DEBUG] Current entries: " << rootPtr->count << "\n";
-        for (int i = 0; i < rootPtr->count; ++i) {
+        std::cout << "\n[NVM BUFFER DEBUG] Current entries: " << rootPtr->messageCount << "\n";
+        for (int i = 0; i < rootPtr->messageCount; ++i) {
             auto* msg = D_RO(rootPtr->messages[i]);
             std::cout << decodeMessageEntry(i, *msg) << "\n";
         }
     }
 
     void printNVMNodeFrequency() {
-        TOID(AuxiliaryMapsRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, AuxiliaryMapsRoot);
-        auto* auxPtr = D_RO(auxRoot);
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);        auto* auxPtr = D_RO(auxRoot);
     
         std::cout << "\n--- [DEBUG] Persistent Node Frequency ---\n";
         for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i) {
@@ -1375,6 +1346,27 @@ public:
             std::cout << "NodeID[" << entry->node_id << "] => freq=" << entry->frequency << "\n";
         }
     }
+
+    void printNVMNodeMessageMap() const {
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RO(auxRoot);
+    
+        std::cout << "\n--- [DEBUG] Persistent nodeMessageMap ---\n";
+        if (auxPtr->nodeMessageMapCount == 0) {
+            std::cout << "(empty)\n";
+            return;
+        }
+    
+        for (int i = 0; i < auxPtr->nodeMessageMapCount; ++i) {
+            auto* entry = D_RO(auxPtr->nodeMessageMap[i]);
+            std::cout << "NodeID[" << entry->node_id << "] => buffered keys: ";
+            for (int j = 0; j < entry->key_list.count; ++j) {
+                std::cout << entry->key_list.keys[j] << " ";
+            }
+            std::cout << "\n";
+        }
+    }
+    
     
     
     std::string decodeMessageEntry(int index, const message& msg) {
@@ -1431,10 +1423,11 @@ public:
     {
         if (!pmemPoolHandle) return std::nullopt;
 
-        TOID(SharedBufferRoot) root = POBJ_ROOT(pmemPoolHandle, SharedBufferRoot);
+        TOID(PMEMRoot) root = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+
         auto* rootPtr = D_RO(root);
 
-        for (int i = 0; i < rootPtr->count; ++i) {
+        for (int i = 0; i < rootPtr->messageCount; ++i) {
             auto* msg = D_RO(rootPtr->messages[i]);
             if (msg->key_size != sizeof(KeyType)) continue;
 
@@ -1451,26 +1444,53 @@ public:
 
     ErrorCode flushMostBufferedNode()
     {
-        if (nodeMessageMap.empty()) return ErrorCode::Success;
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RO(auxRoot);
 
-        auto maxIt = std::max_element(
-            nodeMessageMap.begin(), nodeMessageMap.end(),
-            [](const auto& a, const auto& b) {
-                return a.second.size() < b.second.size();
+        if (auxPtr->nodeMessageMapCount == 0)
+            return ErrorCode::Success;
+
+        // Find node with the largest number of buffered keys
+        int maxIndex = -1;
+        int maxKeys = -1;
+
+        for (int i = 0; i < auxPtr->nodeMessageMapCount; ++i) {
+            auto* entry = D_RO(auxPtr->nodeMessageMap[i]);
+            if (entry->key_list.count > maxKeys) {
+                maxKeys = entry->key_list.count;
+                maxIndex = i;
             }
-        );
+        }
 
-        if (maxIt == nodeMessageMap.end()) {
-            std::cerr << "[FLUSH] No node to flush.\n";
+        if (maxIndex == -1) {
+            std::cerr << "[FLUSH] No node with buffered messages.\n";
             return ErrorCode::Error;
         }
 
-        auto nodeToFlush = maxIt->first;
-        std::cout << "[FLUSH] Flushing node with " << maxIt->second.size()
-                << " messages (first key: " << getNodeKey(nodeToFlush) << ")\n";
+        auto* entry = D_RO(auxPtr->nodeMessageMap[maxIndex]);
+        uint64_t node_id = entry->node_id;
 
-        ErrorCode res = flushBuffer(nodeToFlush);
-        return res;
+        // Match node_id to actual in-memory node
+        std::shared_ptr<Node<KeyType, ValueType>> target = nullptr;
+        std::function<void(std::shared_ptr<Node<KeyType, ValueType>>)> dfs = [&](std::shared_ptr<Node<KeyType, ValueType>> node) {
+            if (!node || node->keys.empty()) return;
+            if (static_cast<uint64_t>(node->keys[0]) == node_id) {
+                target = node;
+                return;
+            }
+            for (auto& child : node->children) {
+                dfs(child);
+                if (target) return;
+            }
+        };
+
+        dfs(root);
+
+        if (!target) {
+            std::cerr << "[FLUSH] Failed to locate in-memory node for node_id " << node_id << "\n";
+            return ErrorCode::Error;
+        }
+        return flushBuffer(target);
     }
 
     std::string getPlatformPath(const std::string& filename) {
@@ -1479,6 +1499,154 @@ public:
         #else
             return "/home/ademzarrouki/Desktop/Benchmark/" + filename;
         #endif
+    }
+
+    // === Persistent nodeMessageMap Helpers ===
+    void addKeyToNodeMessageMap(uint64_t node_id, KeyType key) {
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RW(auxRoot);
+
+        for (int i = 0; i < auxPtr->nodeMessageMapCount; ++i) {
+            auto* entry = D_RW(auxPtr->nodeMessageMap[i]);
+            if (entry->node_id == node_id) {
+                for (int j = 0; j < entry->key_list.count; ++j) {
+                    if (entry->key_list.keys[j] == key) return; // already present
+                }
+                if (entry->key_list.count < MAX_KEYS_PER_NODE) {
+                    entry->key_list.keys[entry->key_list.count++] = key;
+                    pmemobj_persist(pmemPoolHandle, entry, sizeof(NodeMessageEntry));
+                }
+                return;
+            }
         }
-        
+
+        // New entry
+        if (auxPtr->nodeMessageMapCount < MAX_NODES) {
+            TOID(NodeMessageEntry) newEntry;
+            if (pmemobj_alloc(pmemPoolHandle, &newEntry.oid, sizeof(NodeMessageEntry), 0, nullptr, nullptr) == 0) {
+                auto* newPtr = D_RW(newEntry);
+                newPtr->node_id = node_id;
+                newPtr->key_list.count = 1;
+                newPtr->key_list.keys[0] = key;
+                pmemobj_persist(pmemPoolHandle, newPtr, sizeof(NodeMessageEntry));
+
+                auxPtr->nodeMessageMap[auxPtr->nodeMessageMapCount++] = newEntry;
+                pmemobj_persist(pmemPoolHandle, auxPtr, sizeof(PMEMRoot)); 
+            }
+        }
+    }
+
+    std::vector<KeyType> getBufferedKeysForNode(uint64_t node_id) {
+        std::vector<KeyType> result;
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RO(auxRoot);
+
+        for (int i = 0; i < auxPtr->nodeMessageMapCount; ++i) {
+            auto* entry = D_RO(auxPtr->nodeMessageMap[i]);
+            if (entry->node_id == node_id) {
+                for (int j = 0; j < entry->key_list.count; ++j) {
+                    result.push_back(static_cast<KeyType>(entry->key_list.keys[j]));
+                }
+                break;
+            }
+        }
+        return result;
+    }
+
+    void removeKeyFromNodeMessageMap(uint64_t node_id, KeyType key) {
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RW(auxRoot);
+
+        for (int i = 0; i < auxPtr->nodeMessageMapCount; ++i) {
+            auto* entry = D_RW(auxPtr->nodeMessageMap[i]);
+            if (entry->node_id == node_id) {
+                auto& list = entry->key_list;
+                int j = 0;
+                while (j < list.count) {
+                    if (list.keys[j] == key) {
+                        for (int k = j + 1; k < list.count; ++k) {
+                            list.keys[k - 1] = list.keys[k];
+                        }
+                        list.count--;
+                        pmemobj_persist(pmemPoolHandle, entry, sizeof(NodeMessageEntry));
+                        break;
+                    }
+                    ++j;
+                }
+                return;
+            }
+        }
+    }
+
+    void removeKeyFromNodeMessageMap(uint64_t node_id) {
+        auto keys = getBufferedKeysForNode(node_id);
+        for (const auto& k : keys) {
+            removeKeyFromNodeMessageMap(node_id, k);
+        }
+    }
+
+    void moveBufferedKeyBetweenNodes(uint64_t from_id, uint64_t to_id, KeyType key) {
+        removeKeyFromNodeMessageMap(from_id, key);
+        addKeyToNodeMessageMap(to_id, key);
+    }
+
+    void insertToMessageToNodeMap(uint64_t key, uint64_t node_id) {
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RW(auxRoot);
+
+        // Overwrite if key already exists
+        for (int i = 0; i < auxPtr->messageToNodeMapCount; ++i) {
+            auto* entry = D_RW(auxPtr->messageToNodeMap[i]);
+            if (entry->key == key) {
+                entry->node_id = node_id;
+                pmemobj_persist(pmemPoolHandle, entry, sizeof(MessageToNodeEntry));
+                return;
+            }
+        }
+
+        // Insert new entry
+        if (auxPtr->messageToNodeMapCount < MAX_MESSAGES) {
+            TOID(MessageToNodeEntry) newEntry;
+            if (pmemobj_alloc(pmemPoolHandle, &newEntry.oid, sizeof(MessageToNodeEntry), 0, nullptr, nullptr) == 0) {
+                D_RW(newEntry)->key = key;
+                D_RW(newEntry)->node_id = node_id;
+                pmemobj_persist(pmemPoolHandle, D_RW(newEntry), sizeof(MessageToNodeEntry));
+                auxPtr->messageToNodeMap[auxPtr->messageToNodeMapCount++] = newEntry;
+                pmemobj_persist(pmemPoolHandle, auxPtr, sizeof(PMEMRoot)); 
+            }
+        }
+    }
+
+    std::optional<uint64_t> lookupNodeIdForKey(uint64_t key) {
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RO(auxRoot);
+
+        for (int i = 0; i < auxPtr->messageToNodeMapCount; ++i) {
+            auto* entry = D_RO(auxPtr->messageToNodeMap[i]);
+            if (entry->key == key) {
+                return entry->node_id;
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    void removeKeyFromMessageToNodeMap(uint64_t key) {
+        TOID(PMEMRoot) auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto* auxPtr = D_RW(auxRoot);
+
+        for (int i = 0; i < auxPtr->messageToNodeMapCount; ++i) {
+            auto* entry = D_RW(auxPtr->messageToNodeMap[i]);
+            if (entry->key == key) {
+                // Free and shift
+                pmemobj_free(&auxPtr->messageToNodeMap[i].oid);
+                for (int j = i + 1; j < auxPtr->messageToNodeMapCount; ++j) {
+                    auxPtr->messageToNodeMap[j - 1] = auxPtr->messageToNodeMap[j];
+                }
+                auxPtr->messageToNodeMapCount--;
+                pmemobj_persist(pmemPoolHandle, auxPtr, sizeof(PMEMRoot)); 
+                return;
+            }
+        }
+    }     
 };
