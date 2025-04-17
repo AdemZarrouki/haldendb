@@ -2,6 +2,9 @@
 #define NVM_LAYOUT_HPP
 
 #include <libpmemobj.h>
+#include <libpmemobj/pool_base.h>
+#include <libpmemobj/base.h>
+#include <libpmemobj/atomic_base.h>
 #include <cstdint>
 
 struct message;
@@ -10,6 +13,7 @@ struct NodeMessageEntry;
 struct MessageToNodeEntry;
 struct NodeFrequencyEntry;
 struct PMEMRoot;
+struct PersistentNode;
 
 #ifdef _WIN32
 #define LAYOUT_NAME L"bepsilon_layout"
@@ -19,6 +23,7 @@ struct PMEMRoot;
 
 POBJ_LAYOUT_BEGIN(bepsilon_layout);
 POBJ_LAYOUT_ROOT(bepsilon_layout, PMEMRoot);
+POBJ_LAYOUT_TOID(bepsilon_layout, PersistentNode);
 POBJ_LAYOUT_TOID(bepsilon_layout, message);
 POBJ_LAYOUT_TOID(bepsilon_layout, KeyList);
 POBJ_LAYOUT_TOID(bepsilon_layout, NodeMessageEntry);
@@ -29,9 +34,10 @@ POBJ_LAYOUT_END(bepsilon_layout);
 #define MAX_NVM_MESSAGES 4
 #define MAX_KEY_SIZE 64
 #define MAX_VAL_SIZE 64
-#define MAX_KEYS_PER_NODE 32
+#define MAX_KEYS_PER_NODE 4
 #define MAX_NODES 64
 #define MAX_MESSAGES 128
+#define NODE_BUFFER_SIZE 2 * 1024 * 1024  // 2MB
 
 struct message {
     uint8_t opCode;
@@ -62,6 +68,8 @@ struct NodeFrequencyEntry {
 };
 
 struct PMEMRoot {
+    TOID(PersistentNode) persistentRoot;
+    
     // Shared buffer
     TOID(message) messages[MAX_NVM_MESSAGES];
     int messageCount;
@@ -75,6 +83,18 @@ struct PMEMRoot {
 
     TOID(NodeFrequencyEntry) nodeFrequencyMap[MAX_NODES];
     int nodeFrequencyCount;
+};
+
+
+struct PersistentNode {
+    uint8_t isLeaf;
+    size_t keyCount;
+    uint64_t keys[MAX_KEYS_PER_NODE];
+    uint64_t children[MAX_KEYS_PER_NODE + 1];
+
+    // Buffer region for update messages
+    char buffer[NODE_BUFFER_SIZE];
+    size_t buffer_offset;
 };
 
 #endif
