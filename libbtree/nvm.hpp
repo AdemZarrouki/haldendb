@@ -1,3 +1,4 @@
+#pragma once
 #ifndef NVM_LAYOUT_HPP
 #define NVM_LAYOUT_HPP
 
