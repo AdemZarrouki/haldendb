@@ -84,6 +84,8 @@ struct PMEMRoot {
 
     TOID(NodeFrequencyEntry) nodeFrequencyMap[MAX_NODES];
     int nodeFrequencyCount;
+
+    int nextLeafFileID;
 };
 
 

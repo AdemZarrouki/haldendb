@@ -38,6 +38,7 @@ public:
     TOID(PersistentNode)
     persistentRoot;
     PMEMobjpool *pmemPoolHandle = nullptr; // NVM pool
+    TOID(PMEMRoot) pmemRoot;
 
     uint32_t m_nDegree;
     std::string logFilename = getPlatformPath("nvm_tree_test1.log");
@@ -45,7 +46,6 @@ public:
     int checkpointFrequency = 5;
     bool isReplaying = false;
     uint64_t poolUUID = 0;
-    int nextLeafFileID = 0;
 
     // DRAM read buffer
     std::unordered_map<KeyType, ValueType> readCache;
@@ -64,7 +64,6 @@ public:
         initializePMEMPool(pmemPath);
 
         // Load persistentRoot from PMEMRoot
-        TOID(PMEMRoot)
         pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
         persistentRoot = D_RW(pmemRoot)->persistentRoot;
 
@@ -213,6 +212,7 @@ private:
             ptr->nodeFrequencyCount = 0;
             ptr->nodeMessageMapCount = 0;
             ptr->messageToNodeMapCount = 0;
+            ptr->nextLeafFileID = 0;
 
             pmemobj_persist(pmemPoolHandle, ptr, sizeof(PMEMRoot));
             std::cout << "[NVM] New PMEM pool created successfully.\n";
@@ -234,7 +234,9 @@ private:
         if (isLeaf)
         {
             // Store to SSD/HDD instead
-            std::string path = allocateLeafOnDisk(getPlatformPath("leaf_storage"), nextLeafFileID++);
+            pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+            std::string path = allocateLeafOnDisk(getPlatformPath("leaf_storage"), D_RW(pmemRoot)->nextLeafFileID++);
+
             if (path.empty())
             {
                 std::cerr << "[ERROR] Failed to allocate SSD-based leaf node.\n";
@@ -246,7 +248,7 @@ private:
             dummy;
             dummy.oid.off = std::hash<std::string>{}(path); // placeholder
             dummy.oid.pool_uuid_lo = poolUUID;
-            dummy.oid.off = 10000 + nextLeafFileID - 1;
+            dummy.oid.off = 10000 + D_RO(pmemRoot)->nextLeafFileID - 1;
             return dummy;
         }
 
@@ -273,7 +275,8 @@ private:
 
     bool isSSDLeaf(uint64_t node_id)
     {
-        return node_id >= 10000 && node_id <= 10000 + nextLeafFileID;
+        pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        return node_id >= 10000 && node_id <= 10000 + D_RO(pmemRoot)->nextLeafFileID;
     }
 
     std::string getLeafFilePathFromID(uint64_t node_id)
@@ -1061,66 +1064,65 @@ public:
     }
 
     ErrorCode searchRecursive(TOID(PersistentNode) node, KeyType key, ValueType &value)
+{
+    if (TOID_IS_NULL(node))
+        return ErrorCode::KeyDoesNotExist;
+
+    auto *ptr = D_RO(node);
+    if (!ptr)
+        return ErrorCode::Error;
+
+    // Find correct child index
+    int i = 0;
+    while (i < static_cast<int>(ptr->keyCount) && key >= ptr->keys[i])
+        ++i;
+
+    if (i > MAX_KEYS_PER_NODE || ptr->children[i] == 0)
     {
-        if (TOID_IS_NULL(node))
-            return ErrorCode::KeyDoesNotExist;
-
-        auto *ptr = D_RO(node);
-        if (!ptr)
-            return ErrorCode::Error;
-
-        // Find correct child index
-        int i = 0;
-        while (i < static_cast<int>(ptr->keyCount) && key >= ptr->keys[i])
-            ++i;
-
-        if (i > MAX_KEYS_PER_NODE || ptr->children[i] == 0)
-        {
-            std::cerr << "[SEARCH] Invalid child pointer at index " << i << "\n";
-            return ErrorCode::Error;
-        }
-
-        TOID(PersistentNode)
-        child;
-        child.oid.off = ptr->children[i];
-        child.oid.pool_uuid_lo = poolUUID;
-
-        auto *childPtr = D_RO(child);
-        if (!childPtr)
-        {
-            std::cerr << "[SEARCH] Failed to read child node at offset " << ptr->children[i] << "\n";
-            return ErrorCode::Error;
-        }
-
-        if (isSSDLeaf(child.oid.off))
-        {
-            // At the SSD leaf level: load the leaf file and search
-            std::string path = getLeafFilePathFromID(child.oid.off);
-            SerializedLeafNode leaf;
-            if (!loadLeafFromDisk(path, leaf))
-            {
-                std::cerr << "[SEARCH] Failed to load SSD leaf from: " << path << "\n";
-                return ErrorCode::Error;
-            }
-
-            for (int j = 0; j < static_cast<int>(leaf.keyCount); ++j)
-            {
-                if (leaf.keys[j] == static_cast<uint64_t>(key))
-                {
-                    value = static_cast<ValueType>(leaf.values[j]);
-                    return ErrorCode::Success;
-                }
-            }
-            return ErrorCode::KeyDoesNotExist;
-        }
-        else
-        {
-            std::cerr << "[ADEEM] going recursion for node " << child.oid.off << "\n";
-
-            // Still an internal node → recurse
-            return searchRecursive(child, key, value);
-        }
+        std::cerr << "[SEARCH] Invalid child pointer at index " << i << "\n";
+        return ErrorCode::Error;
     }
+
+    TOID(PersistentNode) child;
+    child.oid.off = ptr->children[i];
+    child.oid.pool_uuid_lo = poolUUID;
+
+    auto *childPtr = D_RO(child);
+    if (!childPtr)
+    {
+        std::cerr << "[SEARCH] Failed to read child node at offset " << ptr->children[i] << "\n";
+        return ErrorCode::Error;
+    }
+
+    if (isSSDLeaf(child.oid.off))
+    {
+        // At the SSD leaf level: load the leaf file and search
+        std::string path = getLeafFilePathFromID(child.oid.off);
+        SerializedLeafNode leaf;
+        if (!loadLeafFromDisk(path, leaf))
+        {
+            std::cerr << "[SEARCH] Failed to load SSD leaf from: " << path << "\n";
+            return ErrorCode::Error;
+        }
+
+        for (int j = 0; j < static_cast<int>(leaf.keyCount); ++j)
+        {
+            if (leaf.keys[j] == static_cast<uint64_t>(key))
+            {
+                value = static_cast<ValueType>(leaf.values[j]);
+                return ErrorCode::Success;
+            }
+        }
+        return ErrorCode::KeyDoesNotExist;
+    }
+    else
+    {
+        std::cerr << "[ADEEM] going recursion for node " << child.oid.off << "\n";
+
+        // Still an internal node → recurse
+        return searchRecursive(child, key, value);
+    }
+}
 
     // SEARCH OP
     ErrorCode search(KeyType key, ValueType &value)
@@ -1286,7 +1288,9 @@ public:
         {
             TOID(PersistentNode)
             dummy;
-            dummy.oid.off = 10000 + nextLeafFileID++;
+            pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+
+            dummy.oid.off = 10000 + D_RW(pmemRoot)->nextLeafFileID++;
             dummy.oid.pool_uuid_lo = poolUUID;
 
             std::string path = allocateLeafOnDisk(getPlatformPath("leaf_storage"), dummy.oid.off - 10000);
@@ -1294,8 +1298,6 @@ public:
                 return ErrorCode::Error;
 
             persistentRoot = dummy;
-            TOID(PMEMRoot)
-            pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
             D_RW(pmemRoot)->persistentRoot = persistentRoot;
             pmemobj_persist(pmemPoolHandle, D_RW(pmemRoot), sizeof(PMEMRoot));
         }
@@ -1872,7 +1874,8 @@ public:
             {
                 if (!childPtr)
                     continue;
-                std::memset(&leaf, 0, sizeof(SerializedLeafNode));
+
+                std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
                 leaf->isLeaf = 1;
                 leaf->keyCount = childPtr->keyCount;
                 std::memcpy(leaf->keys, childPtr->keys, sizeof(childPtr->keys));
@@ -2504,7 +2507,9 @@ public:
         original->keyCount = mid;
 
         // Create sibling file
-        uint64_t newLeafID = 10000 + nextLeafFileID++;
+        pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+
+        uint64_t newLeafID = 10000 + D_RW(pmemRoot)->nextLeafFileID++;
         std::string siblingPath = allocateLeafOnDisk(getPlatformPath("leaf_storage"), newLeafID - 10000);
         if (siblingPath.empty())
             return ErrorCode::Error;
@@ -2787,58 +2792,55 @@ public:
     }
 
     void rangeQueryRecursive(TOID(PersistentNode) node, KeyType low, KeyType high,
-                             std::vector<std::pair<KeyType, ValueType>> &result)
+                         std::vector<std::pair<KeyType, ValueType>> &result)
+{
+    if (TOID_IS_NULL(node))
+        return;
+
+    auto *ptr = D_RO(node);
+    if (!ptr)
+        return;
+
+    for (int i = 0; i <= ptr->keyCount; ++i)
     {
-        if (TOID_IS_NULL(node))
-            return;
+        uint64_t childID = ptr->children[i];
+        if (childID == 0) continue;
 
-        auto *ptr = D_RO(node);
-        if (!ptr)
-            return;
+        TOID(PersistentNode) child;
+        child.oid.off = childID;
+        child.oid.pool_uuid_lo = poolUUID;
 
-        for (int i = 0; i <= ptr->keyCount; ++i)
+        auto *childPtr = D_RO(child);
+        if (!childPtr) continue;
+
+        if (childPtr->isLeaf)
         {
-            uint64_t childID = ptr->children[i];
-            if (childID == 0)
-                continue;
-
-            TOID(PersistentNode)
-            child;
-            child.oid.off = childID;
-            child.oid.pool_uuid_lo = poolUUID;
-
-            auto *childPtr = D_RO(child);
-            if (!childPtr)
-                continue;
-
-            if (childPtr->isLeaf)
+            // This is the correct place to load the SSD leaf file
+            std::string path = getLeafFilePathFromID(childID);
+            SerializedLeafNode leaf;
+            if (!loadLeafFromDisk(path, leaf))
             {
-                // This is the correct place to load the SSD leaf file
-                std::string path = getLeafFilePathFromID(childID);
-                SerializedLeafNode leaf;
-                if (!loadLeafFromDisk(path, leaf))
-                {
-                    std::cerr << "[RANGE] Failed to load SSD leaf from: " << path << "\n";
-                    continue;
-                }
-
-                for (int j = 0; j < static_cast<int>(leaf.keyCount); ++j)
-                {
-                    KeyType k = static_cast<KeyType>(leaf.keys[j]);
-                    if (k >= low && k <= high)
-                    {
-                        ValueType v = static_cast<ValueType>(leaf.values[j]);
-                        result.emplace_back(k, v);
-                    }
-                }
+                std::cerr << "[RANGE] Failed to load SSD leaf from: " << path << "\n";
+                continue;
             }
-            else
+
+            for (int j = 0; j < static_cast<int>(leaf.keyCount); ++j)
             {
-                // Still an internal node — recurse deeper
-                rangeQueryRecursive(child, low, high, result);
+                KeyType k = static_cast<KeyType>(leaf.keys[j]);
+                if (k >= low && k <= high)
+                {
+                    ValueType v = static_cast<ValueType>(leaf.values[j]);
+                    result.emplace_back(k, v);
+                }
             }
         }
+        else
+        {
+            // Still an internal node — recurse deeper
+            rangeQueryRecursive(child, low, high, result);
+        }
     }
+}
 
     void displayPersistentTreeWithLeaves()
     {
