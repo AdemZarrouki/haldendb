@@ -649,45 +649,105 @@ public:
                 return ErrorCode::Error;
             }
 
-            // Search for the key in the leaf
-            int pos = 0;
-            while (pos < static_cast<int>(leaf->keyCount) && leaf->keys[pos] < key)
-                ++pos;
-
-            if (pos >= static_cast<int>(leaf->keyCount) || leaf->keys[pos] != key)
+            // Check if key exists in leaf (committed or buffered)
+            if (!keyExistsInLeafOrBuffer(*leaf, key))
             {
                 std::cerr << "[REMOVE] Key " << key << " not found in SSD root.\n";
                 return ErrorCode::KeyDoesNotExist;
             }
 
-            // Shift entries left to delete
-            for (int i = pos; i < static_cast<int>(leaf->keyCount) - 1; ++i)
+            // Create Delete message
+            message msg;
+            msg.opCode = static_cast<uint8_t>(Operations::Delete);
+            msg.key_size = sizeof(KeyType);
+            msg.val_size = 0;
+            std::memcpy(msg.key_data, &key, sizeof(KeyType));
+
+            // Try to append
+            ErrorCode appendRes = appendMessageToLeafBuffer(*leaf, msg);
+            if (appendRes == ErrorCode::BufferFull)
             {
-                leaf->keys[i] = leaf->keys[i + 1];
-                leaf->values[i] = leaf->values[i + 1];
+                std::cout << "[REMOVE] Leaf buffer full — normalizing before retry...\n";
+                ErrorCode normRes = normalizeLeafBuffer(*leaf, persistentRoot.oid.off);
+                if (normRes != ErrorCode::Success)
+                {
+                    std::cerr << "[REMOVE] Failed to normalize SSD buffer.\n";
+                    return normRes;
+                }
+
+                // Retry append after normalization
+                appendRes = appendMessageToLeafBuffer(*leaf, msg);
+                if (appendRes == ErrorCode::BufferFull)
+                {
+                    std::cerr << "[REMOVE] Leaf still full after normalization. Splitting...\n";
+
+                    if (!saveLeafToDisk(path, *leaf))
+                    {
+                        std::cerr << "[REMOVE] Failed to save SSD leaf before split.\n";
+                        return ErrorCode::Error;
+                    }
+
+                    ErrorCode splitRes = splitSSDLeaf(TOID_NULL(PersistentNode), persistentRoot.oid.off, key);
+                    if (splitRes != ErrorCode::Success)
+                    {
+                        std::cerr << "[REMOVE] Failed to split SSD leaf during remove.\n";
+                        return splitRes;
+                    }
+
+                    goto buffered_remove; // after split, buffer the delete in NVM
+                }
             }
 
-            leaf->keyCount--;
-
+            // Save updated leaf
             if (!saveLeafToDisk(path, *leaf))
             {
-                std::cerr << "[REMOVE] Failed to save SSD leaf after deletion.\n";
+                std::cerr << "[REMOVE] Failed to save SSD leaf after remove.\n";
                 return ErrorCode::Error;
-            }
-
-            if (leaf->keyCount < (MAX_KEYS_PER_NODE / 2))
-            {
-                TOID(PersistentNode)
-                parent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), persistentRoot);
-                if (!TOID_IS_NULL(parent))
-                {
-                    handleUnderflowPersistent(parent, persistentRoot);
-                }
             }
 
             maybeCheckpoint();
             return ErrorCode::Success;
         }
+
+        //     // Search for the key in the leaf
+        //     int pos = 0;
+        //     while (pos < static_cast<int>(leaf->keyCount) && leaf->keys[pos] < key)
+        //         ++pos;
+
+        //     if (pos >= static_cast<int>(leaf->keyCount) || leaf->keys[pos] != key)
+        //     {
+        //         std::cerr << "[REMOVE] Key " << key << " not found in SSD root.\n";
+        //         return ErrorCode::KeyDoesNotExist;
+        //     }
+
+        //     // Shift entries left to delete
+        //     for (int i = pos; i < static_cast<int>(leaf->keyCount) - 1; ++i)
+        //     {
+        //         leaf->keys[i] = leaf->keys[i + 1];
+        //         leaf->values[i] = leaf->values[i + 1];
+        //     }
+
+        //     leaf->keyCount--;
+
+        //     if (!saveLeafToDisk(path, *leaf))
+        //     {
+        //         std::cerr << "[REMOVE] Failed to save SSD leaf after deletion.\n";
+        //         return ErrorCode::Error;
+        //     }
+
+        //     if (leaf->keyCount < (MAX_KEYS_PER_NODE / 2))
+        //     {
+        //         TOID(PersistentNode)
+        //         parent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), persistentRoot);
+        //         if (!TOID_IS_NULL(parent))
+        //         {
+        //             handleUnderflowPersistent(parent, persistentRoot);
+        //         }
+        //     }
+
+        //     maybeCheckpoint();
+        //     return ErrorCode::Success;
+        // }
     buffered_remove:
         // Internal tree -> buffer the delete message
         TOID(PersistentNode)
@@ -1421,7 +1481,7 @@ public:
             if (appendRes == ErrorCode::BufferFull)
             {
                 // Normalize if buffer is full
-                std::cout << "[INSERT] SSD leaf buffer full. Normalizing...\n";
+                //std::cout << "[INSERT] SSD leaf buffer full. Normalizing...\n";
                 ErrorCode normRes = normalizeLeafBuffer(*leaf, persistentRoot.oid.off);
                 if (normRes != ErrorCode::Success)
                 {
@@ -1859,7 +1919,7 @@ public:
 
         for (const auto &key : bufferedKeys)
         {
-            // std::cerr << "[FLUSH FLUSHING KEY " << key << "\n";
+            std::cerr << "[FLUSH FLUSHING KEY " << key << "\n";
             auto messageOpt = lookupInNVMBuffer(key);
             if (!messageOpt.has_value())
                 continue;
@@ -1970,102 +2030,6 @@ public:
 
             if (op == Operations::Insert || op == Operations::Update)
             {
-                // // std::cout << "[FLUSH DEBUG] SSD Leaf " << child.oid.off
-                // //<< " BEFORE insert: keyCount = " << leaf->keyCount
-                // // << ", inserting key = " << key << "\n";
-
-                // if (pos < static_cast<int>(leaf->keyCount) && leaf->keys[pos] == key)
-                // {
-                //     leaf->values[pos] = val;
-                // }
-                // else
-                // {
-                //     for (int j = static_cast<int>(leaf->keyCount); j > pos; --j)
-                //     {
-                //         leaf->keys[j] = leaf->keys[j - 1];
-                //         leaf->values[j] = leaf->values[j - 1];
-                //     }
-                //     leaf->keys[pos] = key;
-                //     leaf->values[pos] = val;
-                //     leaf->keyCount++;
-                //     // std::cout << "[FLUSH DEBUG] SSD Leaf " << child.oid.off
-                //     //<< " AFTER insert: keyCount = " << leaf->keyCount << "\n";
-                // }
-
-                // // std::cout << "[FLUSH CHECK] Leaf keyCount = " << leaf->keyCount << ", key = " << key << "\n";
-
-                // if (isSSD && leaf->keyCount >= MAX_KEYS_PER_NODE)
-                // {
-                //     // std::cout << "[FLUSH DEBUG] Initiating SSD split for leaf: " << child.oid.off
-                //     //<< ", parent: " << flushParent.oid.off << "\n";
-                //     if (!TOID_IS_NULL(flushParent))
-                //     {
-                //         auto *p = D_RW(flushParent);
-                //         // std::cout << "[FLUSH DEBUG] Parent keyCount = " << p->keyCount << "\n";
-                //     }
-                //     else
-                //     {
-                //         std::cerr << "[FLUSH ERROR] flushParent is NULL\n";
-                //     }
-                //     // Fallback: re-locate parent in case flushParent is stale
-
-                //     TOID(PersistentNode)
-                //     revalidatedParent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), child);
-                //     if (!TOID_IS_NULL(revalidatedParent))
-                //     {
-                //         flushParent = revalidatedParent;
-                //     }
-
-                //     std::string path = getLeafFilePathFromID(child.oid.off);
-
-                //     if (!saveLeafToDisk(path, *leaf))
-                //     {
-                //         std::cerr << "[FLUSH] Failed to persist SSD leaf before split.\n";
-                //         return ErrorCode::Error;
-                //     }
-                //     if (!TOID_IS_NULL(flushParent))
-                //     {
-                //         auto *p = D_RW(flushParent);
-                //         if (flushParent.oid.off == persistentRoot.oid.off && p->keyCount >= MAX_KEYS_PER_NODE)
-                //         {
-                //             // std::cout << "[FLUSH] Root is full -> Pre-splitting root before continuing SSD split\n";
-                //             TOID(PersistentNode)
-                //             grandparent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), flushParent);
-                //             ErrorCode res = splitPersistentNode(grandparent, flushParent);
-                //             if (res != ErrorCode::Success)
-                //             {
-                //                 std::cerr << "[FLUSH] Root split failed.\n";
-                //                 return res;
-                //             }
-
-                //             // Refresh root + flushParent after split
-                //             TOID(PMEMRoot)
-                //             pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
-                //             persistentRoot = D_RW(pmemRoot)->persistentRoot;
-                //             flushParent = findTargetInternalNodeForKey(persistentRoot, key);
-                //             if (TOID_IS_NULL(flushParent))
-                //             {
-                //                 std::cerr << "[FLUSH] Could not re-fetch parent after root split.\n";
-                //                 return ErrorCode::Error;
-                //             }
-                //         }
-                //     }
-
-                //     // Now trigger the split (splitSSDLeaf will reload from disk)
-                //     ErrorCode splitRes = splitSSDLeaf(flushParent, child.oid.off, key);
-
-                //     if (splitRes != ErrorCode::Success)
-                //     {
-                //         std::cerr << "[FLUSH] Failed to split SSD leaf.\n";
-                //         return splitRes;
-                //     }
-                //     // std::cout << "[FLUSH] SSD split complete — removing key " << key << " from buffer to prevent re-split.\n";
-                //     removeKeyFromAllNodeMessageMaps(key);
-                //     removeKeyFromMessageToNodeMap(key);
-                //     removeFromNVMBuffer(key);
-                //     continue;
-                // }
-                // Construct the message
                 // Construct the message
                 message msg;
                 msg.opCode = static_cast<uint8_t>(op);
@@ -2140,93 +2104,6 @@ public:
             }
             else if (op == Operations::Delete)
             {
-                // std::cout << "[DELETE] Processing delete for key: " << key << "\n";
-
-                // if (pos < static_cast<int>(leaf->keyCount) && leaf->keys[pos] == key)
-                // {
-                //     std::cout << "[DELETE] Key " << key << " found in leaf. Removing...\n";
-                //     for (int j = pos; j < static_cast<int>(leaf->keyCount) - 1; ++j)
-                //     {
-                //         leaf->keys[j] = leaf->keys[j + 1];
-                //         leaf->values[j] = leaf->values[j + 1];
-                //     }
-                //     leaf->keyCount--;
-
-                //     // REMOVE FROM INTERNAL NODE IF FOUND
-                //     TOID(PersistentNode)
-                //     parent = flushParent;
-                //     for (int j = 0; j < parentPtr->keyCount; ++j)
-                //     {
-                //         if (parentPtr->keys[j] == key)
-                //         {
-                //             std::cout << "[DELETE] Key " << key << " also exists in parent. Removing from internal node.\n";
-                //             for (int k = j; k < parentPtr->keyCount - 1; ++k)
-                //                 parentPtr->keys[k] = parentPtr->keys[k + 1];
-                //             for (int k = j + 1; k <= parentPtr->keyCount; ++k)
-                //                 parentPtr->children[k] = parentPtr->children[k + 1];
-                //             parentPtr->keyCount--;
-
-                //             std::cout << "[DELETE] COUNT " << parentPtr->keyCount << " NUMBERS\n";
-                //             pmemobj_persist(pmemPoolHandle, parentPtr, sizeof(PersistentNode));
-                //             // After internal key removal, check for underflow
-                //             if (parentPtr->keyCount < (m_nDegree / 2))
-                //             {
-                //                 if (parent.oid.off == persistentRoot.oid.off)
-                //                 {
-                //                     // ROOT UNDERFLOW: shrink if single child
-                //                     std::cout << "[DELETE] Internal root underflowed. Shrinking root...\n";
-
-                //                     TOID(PersistentNode)
-                //                     newRoot;
-                //                     newRoot.oid.off = parentPtr->children[0];
-                //                     newRoot.oid.pool_uuid_lo = poolUUID;
-
-                //                     pmemobj_free(&persistentRoot.oid);
-                //                     persistentRoot = newRoot;
-
-                //                     TOID(PMEMRoot)
-                //                     pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
-                //                     D_RW(pmemRoot)->persistentRoot = persistentRoot;
-                //                     pmemobj_persist(pmemPoolHandle, D_RW(pmemRoot), sizeof(PMEMRoot));
-                //                 }
-                //                 else
-                //                 {
-                //                     // NON-ROOT UNDERFLOW -> recurse
-                //                     std::cout << "[DELETE] Internal parent " << parent.oid.off
-                //                               << " underflowed after deleting key " << key << "\n";
-
-                //                     TOID(PersistentNode)
-                //                     grandparent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), parent);
-                //                     if (!TOID_IS_NULL(grandparent))
-                //                     {
-                //                         ErrorCode res = handleUnderflowPersistent(grandparent, parent);
-                //                         if (res != ErrorCode::Success)
-                //                         {
-                //                             std::cerr << "[DELETE] Failed to handle underflow in internal parent " << parent.oid.off << "\n";
-                //                             return res;
-                //                         }
-                //                     }
-                //                 }
-                //             }
-
-                //             break;
-                //         }
-                //     }
-
-                //     // UNDERFLOW CHECK
-                //     if (leaf->keyCount < MAX_KEYS_PER_NODE / 2)
-                //     {
-                //         std::cout << "[DELETE] Leaf underflow detected. Triggering merge/borrow...\n";
-                //         auto res = handleUnderflowPersistent(flushParent, child);
-                //         if (res != ErrorCode::Success)
-                //             std::cerr << "[DELETE] Underflow recovery failed for key " << key << "\n";
-                //     }
-                // }
-                // else
-                // {
-                //     std::cout << "[DELETE] Key " << key << " not found in leaf. No deletion performed.\n";
-                // }
-
                 std::cout << "[DELETE] Appending delete for key: " << key << "\n";
 
                 // Construct delete message
@@ -3298,7 +3175,7 @@ public:
         leaf.buffer_offset += msgSize;
         if (leaf.buffer_offset + msgSize >= NODE_BUFFER_SIZE)
         {
-            std::cerr << "[LEAF BUFFER] will be in the next message => need to normalize\n";
+            //std::cerr << "[LEAF BUFFER] will be in the next message => need to normalize\n";
             return ErrorCode::BufferFull;
         }
         return ErrorCode::Success;
@@ -3359,7 +3236,7 @@ public:
 
     {
         coalesceLeafBuffer(leaf);
-        std::cout << "[NORMALIZE] Dumping leaf buffer (" << leaf.buffer_offset << " bytes):\n";
+        //std::cout << "[NORMALIZE] Dumping leaf buffer (" << leaf.buffer_offset << " bytes):\n";
 
         // Collect all messages into a vector
         std::vector<message> msgs;
@@ -3384,8 +3261,12 @@ public:
             std::memcpy(&keyB, b.key_data, sizeof(KeyType));
             return keyA < keyB; });
 
-        // Print sorted messages
-        int idx = 0;
+
+        // Prepare a temporary buffer to hold remaining unprocessed messages
+        char tempBuffer[NODE_BUFFER_SIZE];
+        size_t tempOffset = 0;
+
+        
         for (const auto &msg : msgs)
         {
             KeyType key;
@@ -3395,40 +3276,6 @@ public:
             if (msg.opCode != static_cast<uint8_t>(Operations::Delete))
                 std::memcpy(&val, msg.val_data, sizeof(ValueType));
 
-            Operations op = static_cast<Operations>(msg.opCode);
-
-            std::cout << "  [" << idx++ << "] Op: " << static_cast<int>(op)
-                      << " | Key: " << key;
-
-            if (op != Operations::Delete)
-                std::cout << " | Value: " << val;
-
-            std::cout << "\n";
-        }
-
-        // Prepare a temporary buffer to hold remaining unprocessed messages
-        char tempBuffer[NODE_BUFFER_SIZE];
-        size_t tempOffset = 0;
-
-        size_t offset = 0;
-        while (offset + sizeof(message) <= leaf.buffer_offset)
-        {
-            message msg;
-            std::memcpy(&msg, leaf.buffer + offset, sizeof(message));
-            offset += sizeof(message);
-
-            if (msg.key_size != sizeof(KeyType))
-            {
-                std::cerr << "[NORMALIZE] Invalid key size. Skipping.\n";
-                continue;
-            }
-
-            KeyType key;
-            std::memcpy(&key, msg.key_data, sizeof(KeyType));
-
-            ValueType val{};
-            if (msg.opCode != static_cast<uint8_t>(Operations::Delete))
-                std::memcpy(&val, msg.val_data, sizeof(ValueType));
 
             int pos = 0;
             while (pos < static_cast<int>(leaf.keyCount) && leaf.keys[pos] < key)
