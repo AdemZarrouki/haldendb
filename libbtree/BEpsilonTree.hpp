@@ -1143,7 +1143,7 @@ public:
                 appendRes = appendMessageToLeafBuffer(*leaf, msg);
                 if (appendRes == ErrorCode::BufferFull)
                 {
-                    //std::cout << "[UPDATE] Still full after normalization — splitting SSD leaf...\n";
+                    // std::cout << "[UPDATE] Still full after normalization — splitting SSD leaf...\n";
                     if (!saveLeafToDisk(path, *leaf))
                     {
                         std::cerr << "[UPDATE] Failed to save SSD leaf before split.\n";
@@ -1481,7 +1481,7 @@ public:
             if (appendRes == ErrorCode::BufferFull)
             {
                 // Normalize if buffer is full
-                //std::cout << "[INSERT] SSD leaf buffer full. Normalizing...\n";
+                // std::cout << "[INSERT] SSD leaf buffer full. Normalizing...\n";
                 ErrorCode normRes = normalizeLeafBuffer(*leaf, persistentRoot.oid.off);
                 if (normRes != ErrorCode::Success)
                 {
@@ -1492,7 +1492,7 @@ public:
                 // Split if needed
                 if (leaf->keyCount >= MAX_KEYS_PER_NODE)
                 {
-                    //std::cout << "[INSERT] Leaf full after normalization. Splitting...\n";
+                    // std::cout << "[INSERT] Leaf full after normalization. Splitting...\n";
 
                     // Promote root before split
                     uint64_t oldSSDId = persistentRoot.oid.off;
@@ -1636,7 +1636,7 @@ public:
         // STOP if child is an SSD leaf
         if (isSSDLeaf(child.oid.off))
         {
-            //std::cout << "[ROUTING] Target child is SSD leaf -> stop at internal node " << node.oid.off << "\n";
+            // std::cout << "[ROUTING] Target child is SSD leaf -> stop at internal node " << node.oid.off << "\n";
             return node;
         }
 
@@ -2056,7 +2056,7 @@ public:
                     // After normalization, check if leaf is full -> split before retrying
                     if (leaf->keyCount >= MAX_KEYS_PER_NODE)
                     {
-                        //std::cout << "[FLUSH] Leaf is full after normalization — splitting SSD leaf...\n";
+                        // std::cout << "[FLUSH] Leaf is full after normalization — splitting SSD leaf...\n";
 
                         TOID(PersistentNode)
                         revalidatedParent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), child);
@@ -2130,7 +2130,7 @@ public:
                     // After normalization, if leaf is full, we must split
                     if (leaf->keyCount >= MAX_KEYS_PER_NODE)
                     {
-                        //std::cout << "[FLUSH] SSD leaf full after normalization — splitting...\n";
+                        // std::cout << "[FLUSH] SSD leaf full after normalization — splitting...\n";
 
                         TOID(PersistentNode)
                         revalidatedParent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), child);
@@ -2582,7 +2582,7 @@ public:
 
         if (leaf.buffer_offset + msgSize > NODE_BUFFER_SIZE)
         {
-            //std::cerr << "[moveMessageToLeaf] Error: Leaf buffer full while moving message.\n";
+            // std::cerr << "[moveMessageToLeaf] Error: Leaf buffer full while moving message.\n";
             return ErrorCode::BufferFull;
         }
 
@@ -2605,7 +2605,7 @@ public:
         // 1. Normalize leaf buffer first
         if (original->buffer_offset > 0)
         {
-            //std::cout << "[SPLIT SSD] Normalizing in-place buffer before splitting...\n";
+            // std::cout << "[SPLIT SSD] Normalizing in-place buffer before splitting...\n";
             ErrorCode res = normalizeLeafBuffer(*original, leafID);
             if (res != ErrorCode::Success)
             {
@@ -2663,7 +2663,7 @@ public:
             if (moveResult != ErrorCode::Success)
             {
                 // Rebuffer into NVM shared buffer instead of losing it!
-                //std::cout << "[splitSSDLeaf] Rebuffering key " << bufferedKey << " because move failed.\n";
+                // std::cout << "[splitSSDLeaf] Rebuffering key " << bufferedKey << " because move failed.\n";
                 KeyType key;
                 ValueType value;
                 std::memcpy(&key, msg->key_data, sizeof(KeyType));
@@ -3175,7 +3175,7 @@ public:
         leaf.buffer_offset += msgSize;
         if (leaf.buffer_offset + msgSize >= NODE_BUFFER_SIZE)
         {
-            //std::cerr << "[LEAF BUFFER] will be in the next message => need to normalize\n";
+            // std::cerr << "[LEAF BUFFER] will be in the next message => need to normalize\n";
             return ErrorCode::BufferFull;
         }
         return ErrorCode::Success;
@@ -3236,7 +3236,7 @@ public:
 
     {
         coalesceLeafBuffer(leaf);
-        //std::cout << "[NORMALIZE] Dumping leaf buffer (" << leaf.buffer_offset << " bytes):\n";
+        // std::cout << "[NORMALIZE] Dumping leaf buffer (" << leaf.buffer_offset << " bytes):\n";
 
         // Collect all messages into a vector
         std::vector<message> msgs;
@@ -3261,12 +3261,10 @@ public:
             std::memcpy(&keyB, b.key_data, sizeof(KeyType));
             return keyA < keyB; });
 
-
         // Prepare a temporary buffer to hold remaining unprocessed messages
         char tempBuffer[NODE_BUFFER_SIZE];
         size_t tempOffset = 0;
 
-        
         for (const auto &msg : msgs)
         {
             KeyType key;
@@ -3276,7 +3274,6 @@ public:
             if (msg.opCode != static_cast<uint8_t>(Operations::Delete))
                 std::memcpy(&val, msg.val_data, sizeof(ValueType));
 
-
             int pos = 0;
             while (pos < static_cast<int>(leaf.keyCount) && leaf.keys[pos] < key)
                 ++pos;
@@ -3285,7 +3282,7 @@ public:
 
             if (op == Operations::Insert || op == Operations::Upsert)
             {
-                //std::cerr << "[NORMALIZE] INSERTING KEY " << key << "\n";
+                // std::cerr << "[NORMALIZE] INSERTING KEY " << key << "\n";
                 if (pos < static_cast<int>(leaf.keyCount) && leaf.keys[pos] == key)
                 {
                     leaf.values[pos] = val;
@@ -3297,7 +3294,7 @@ public:
                         // Leaf full — cannot insert now. Re-buffer the message
                         std::memcpy(tempBuffer + tempOffset, &msg, sizeof(message));
                         tempOffset += sizeof(message);
-                        //std::cerr << "[NORMALIZE] Leaf full. Re-buffering key " << key << "\n";
+                        // std::cerr << "[NORMALIZE] Leaf full. Re-buffering key " << key << "\n";
                         continue;
                     }
 
