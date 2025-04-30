@@ -188,7 +188,7 @@ private:
                                              1024 * 1024 * 1024, 0666);
 #else
             pmemPoolHandle = pmemobj_create(pmemPath.c_str(), LAYOUT_NAME,
-                                            1024 * 1024 * 1024, 0666);
+                                            32ull * 1024 * 1024 * 1024, 0666);
 #endif
 
             if (!pmemPoolHandle)
@@ -637,6 +637,7 @@ public:
         {
             std::string path = getLeafFilePathFromID(persistentRoot.oid.off);
             auto leaf = std::make_unique<SerializedLeafNode>();
+            std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
 
             if (!std::filesystem::exists(path))
             {
@@ -709,45 +710,6 @@ public:
             return ErrorCode::Success;
         }
 
-        //     // Search for the key in the leaf
-        //     int pos = 0;
-        //     while (pos < static_cast<int>(leaf->keyCount) && leaf->keys[pos] < key)
-        //         ++pos;
-
-        //     if (pos >= static_cast<int>(leaf->keyCount) || leaf->keys[pos] != key)
-        //     {
-        //         std::cerr << "[REMOVE] Key " << key << " not found in SSD root.\n";
-        //         return ErrorCode::KeyDoesNotExist;
-        //     }
-
-        //     // Shift entries left to delete
-        //     for (int i = pos; i < static_cast<int>(leaf->keyCount) - 1; ++i)
-        //     {
-        //         leaf->keys[i] = leaf->keys[i + 1];
-        //         leaf->values[i] = leaf->values[i + 1];
-        //     }
-
-        //     leaf->keyCount--;
-
-        //     if (!saveLeafToDisk(path, *leaf))
-        //     {
-        //         std::cerr << "[REMOVE] Failed to save SSD leaf after deletion.\n";
-        //         return ErrorCode::Error;
-        //     }
-
-        //     if (leaf->keyCount < (MAX_KEYS_PER_NODE / 2))
-        //     {
-        //         TOID(PersistentNode)
-        //         parent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), persistentRoot);
-        //         if (!TOID_IS_NULL(parent))
-        //         {
-        //             handleUnderflowPersistent(parent, persistentRoot);
-        //         }
-        //     }
-
-        //     maybeCheckpoint();
-        //     return ErrorCode::Success;
-        // }
     buffered_remove:
         // Internal tree -> buffer the delete message
         TOID(PersistentNode)
@@ -799,29 +761,32 @@ public:
             return ErrorCode::Error;
         }
 
-        SerializedLeafNode leftLeaf, rightLeaf;
+        auto leftLeaf = std::make_unique<SerializedLeafNode>();
+        auto rightLeaf = std::make_unique<SerializedLeafNode>();
+        std::memset(leftLeaf.get(), 0, sizeof(SerializedLeafNode));
+        std::memset(rightLeaf.get(), 0, sizeof(SerializedLeafNode));
 
-        if (!loadLeafFromDisk(leftPath, leftLeaf) || !loadLeafFromDisk(rightPath, rightLeaf))
+        if (!loadLeafFromDisk(leftPath, *leftLeaf) || !loadLeafFromDisk(rightPath, *rightLeaf))
         {
             std::cerr << "[MERGE ERROR] Failed to load SSD leaves from disk\n";
             return ErrorCode::Error;
         }
 
-        if (leftLeaf.keyCount + rightLeaf.keyCount > MAX_KEYS_PER_NODE)
+        if (leftLeaf->keyCount + rightLeaf->keyCount > MAX_KEYS_PER_NODE)
         {
             std::cerr << "[MERGE ERROR] Combined key count exceeds capacity\n";
             return ErrorCode::Error;
         }
 
-        for (int i = 0; i < static_cast<int>(rightLeaf.keyCount); ++i)
+        for (int i = 0; i < static_cast<int>(rightLeaf->keyCount); ++i)
         {
-            leftLeaf.keys[leftLeaf.keyCount + i] = rightLeaf.keys[i];
-            leftLeaf.values[leftLeaf.keyCount + i] = rightLeaf.values[i];
+            leftLeaf->keys[leftLeaf->keyCount + i] = rightLeaf->keys[i];
+            leftLeaf->values[leftLeaf->keyCount + i] = rightLeaf->values[i];
         }
 
-        leftLeaf.keyCount += rightLeaf.keyCount;
+        leftLeaf->keyCount += rightLeaf->keyCount;
 
-        if (!saveLeafToDisk(leftPath, leftLeaf))
+        if (!saveLeafToDisk(leftPath, *leftLeaf))
         {
             std::cerr << "[MERGE ERROR] Failed to persist merged SSD leaf\n";
             return ErrorCode::Error;
@@ -1098,6 +1063,7 @@ public:
         {
             std::string path = getLeafFilePathFromID(persistentRoot.oid.off);
             auto leaf = std::make_unique<SerializedLeafNode>();
+            std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
 
             if (!std::filesystem::exists(path))
             {
@@ -1230,35 +1196,20 @@ public:
         {
             // At the SSD leaf level: load the leaf file and search
             std::string path = getLeafFilePathFromID(child.oid.off);
-            SerializedLeafNode leaf;
-            if (!loadLeafFromDisk(path, leaf))
+            auto leaf = std::make_unique<SerializedLeafNode>();
+            std::memset(leaf.get(), 0, sizeof(SerializedLeafNode)); // <-- ADD THIS after std::make_unique
+
+            if (!loadLeafFromDisk(path, *leaf))
             {
                 std::cerr << "[SEARCH] Failed to load SSD leaf from: " << path << "\n";
                 return ErrorCode::Error;
             }
-            if (leaf.buffer_offset > 0)
-            {
-                std::cout << "[SEARCH] Normalizing SSD leaf buffer before search...\n";
-                ErrorCode res = normalizeLeafBuffer(leaf, child.oid.off);
-                if (res != ErrorCode::Success)
-                {
-                    std::cerr << "[SEARCH] Failed to normalize buffer.\n";
-                    return ErrorCode::Error;
-                }
 
-                // Optional: write back updated contents
-                if (!saveLeafToDisk(path, leaf))
-                {
-                    std::cerr << "[SEARCH] Failed to save normalized SSD leaf.\n";
-                    return ErrorCode::Error;
-                }
-            }
-
-            for (int j = 0; j < static_cast<int>(leaf.keyCount); ++j)
+            for (int j = 0; j < static_cast<int>(leaf->keyCount); ++j)
             {
-                if (leaf.keys[j] == static_cast<uint64_t>(key))
+                if (leaf->keys[j] == static_cast<uint64_t>(key))
                 {
-                    value = static_cast<ValueType>(leaf.values[j]);
+                    value = static_cast<ValueType>(leaf->values[j]);
                     return ErrorCode::Success;
                 }
             }
@@ -1307,12 +1258,38 @@ public:
         // 3. SSD-based persistent tree traversal
         if (!TOID_IS_NULL(persistentRoot))
         {
-            ErrorCode result = searchRecursive(persistentRoot, key, value);
-            if (result == ErrorCode::Success)
+            if (isSSDLeaf(persistentRoot.oid.off))
             {
-                updateReadCache(key, value);
+                // Special case: root is an SSD leaf
+                std::string path = getLeafFilePathFromID(persistentRoot.oid.off);
+                auto leaf = std::make_unique<SerializedLeafNode>();
+                std::memset(leaf.get(), 0, sizeof(SerializedLeafNode)); // <-- ADD THIS after std::make_unique
+
+                if (!loadLeafFromDisk(path, *leaf))
+                {
+                    std::cerr << "[SEARCH] Failed to load SSD root leaf from: " << path << "\n";
+                    return ErrorCode::Error;
+                }
+                for (int j = 0; j < static_cast<int>(leaf->keyCount); ++j)
+                {
+                    if (leaf->keys[j] == static_cast<uint64_t>(key))
+                    {
+                        value = static_cast<ValueType>(leaf->values[j]);
+                        updateReadCache(key, value);
+                        return ErrorCode::Success;
+                    }
+                }
+                return ErrorCode::KeyDoesNotExist;
             }
-            return result;
+            else
+            {
+                ErrorCode result = searchRecursive(persistentRoot, key, value);
+                if (result == ErrorCode::Success)
+                {
+                    updateReadCache(key, value);
+                }
+                return result;
+            }
         }
 
         return ErrorCode::KeyDoesNotExist;
@@ -1481,7 +1458,7 @@ public:
             if (appendRes == ErrorCode::BufferFull)
             {
                 // Normalize if buffer is full
-                // std::cout << "[INSERT] SSD leaf buffer full. Normalizing...\n";
+                std::cout << "[INSERT] SSD leaf buffer full. Normalizing...\n";
                 ErrorCode normRes = normalizeLeafBuffer(*leaf, persistentRoot.oid.off);
                 if (normRes != ErrorCode::Success)
                 {
@@ -1492,7 +1469,7 @@ public:
                 // Split if needed
                 if (leaf->keyCount >= MAX_KEYS_PER_NODE)
                 {
-                    // std::cout << "[INSERT] Leaf full after normalization. Splitting...\n";
+                    std::cout << "[INSERT] Leaf full after normalization. Splitting...\n";
 
                     // Promote root before split
                     uint64_t oldSSDId = persistentRoot.oid.off;
@@ -1919,7 +1896,7 @@ public:
 
         for (const auto &key : bufferedKeys)
         {
-            std::cerr << "[FLUSH FLUSHING KEY " << key << "\n";
+            // std::cerr << "[FLUSH FLUSHING KEY " << key << "\n";
             auto messageOpt = lookupInNVMBuffer(key);
             if (!messageOpt.has_value())
                 continue;
@@ -2044,7 +2021,7 @@ public:
 
                 if (appendResult == ErrorCode::BufferFull)
                 {
-                    std::cout << "[FLUSH] Leaf " << child.oid.off << " buffer full for key " << key << " — normalizing...\n";
+                    // std::cout << "[FLUSH] Leaf " << child.oid.off << " buffer full for key " << key << " — normalizing...\n";
 
                     ErrorCode normRes = normalizeLeafBuffer(*leaf, child.oid.off);
                     if (normRes != ErrorCode::Success)
@@ -2201,7 +2178,6 @@ public:
 
         return ErrorCode::Success;
     }
-
     TOID(PersistentNode)
     findLeafNodeForKey(TOID(PersistentNode) node, const KeyType &key)
     {
@@ -2559,6 +2535,7 @@ public:
         // std::cout << "[ALLOC] Creating file: " << path << "\n";
 
         auto *node = new SerializedLeafNode(); // allocated on heap
+        std::memset(node, 0, sizeof(SerializedLeafNode));
 
         std::ofstream file(path, std::ios::binary);
         if (!file.is_open())
@@ -2596,6 +2573,8 @@ public:
     {
         std::string leafPath = getLeafFilePathFromID(leafID);
         auto original = std::make_unique<SerializedLeafNode>();
+        std::memset(original.get(), 0, sizeof(SerializedLeafNode));
+
         if (!loadLeafFromDisk(leafPath, *original))
         {
             std::cerr << "[SPLIT] Failed to load leaf from: " << leafPath << "\n";
@@ -2624,6 +2603,8 @@ public:
         int mid = original->keyCount / 2;
 
         auto sibling = std::make_unique<SerializedLeafNode>();
+        std::memset(sibling.get(), 0, sizeof(SerializedLeafNode));
+
         sibling->keyCount = original->keyCount - mid;
         sibling->isLeaf = 1;
 
@@ -3052,13 +3033,15 @@ public:
             {
                 // This is the correct place to load the SSD leaf file
                 std::string path = getLeafFilePathFromID(childID);
-                SerializedLeafNode leaf;
-                if (!loadLeafFromDisk(path, leaf))
+                auto leaf = std::make_unique<SerializedLeafNode>();
+                std::memset(leaf.get(), 0, sizeof(SerializedLeafNode)); // <-- ADD THIS after std::make_unique
+
+                if (!loadLeafFromDisk(path, *leaf))
                 {
                     std::cerr << "[RANGE] Failed to load SSD leaf from: " << path << "\n";
                     continue;
                 }
-                if (leaf.buffer_offset > 0)
+                if (leaf->buffer_offset > 0)
                 {
                     std::cout << "[RANGE] Normalizing SSD leaf buffer before range scan...\n";
                     ErrorCode res = normalizeLeafBuffer(leaf, child.oid.off);
@@ -3068,19 +3051,19 @@ public:
                         continue;
                     }
 
-                    if (!saveLeafToDisk(path, leaf))
+                    if (!saveLeafToDisk(path, *leaf))
                     {
                         std::cerr << "[RANGE] Failed to save normalized SSD leaf.\n";
                         continue;
                     }
                 }
 
-                for (int j = 0; j < static_cast<int>(leaf.keyCount); ++j)
+                for (int j = 0; j < static_cast<int>(leaf->keyCount); ++j)
                 {
-                    KeyType k = static_cast<KeyType>(leaf.keys[j]);
+                    KeyType k = static_cast<KeyType>(leaf->keys[j]);
                     if (k >= low && k <= high)
                     {
-                        ValueType v = static_cast<ValueType>(leaf.values[j]);
+                        ValueType v = static_cast<ValueType>(leaf->values[j]);
                         result.emplace_back(k, v);
                     }
                 }
@@ -3109,17 +3092,19 @@ public:
         {
             // Load and display SSD leaf contents
             std::string path = getLeafFilePathFromID(node.oid.off);
-            SerializedLeafNode leaf;
-            if (!loadLeafFromDisk(path, leaf))
+            auto leaf = std::make_unique<SerializedLeafNode>();
+            std::memset(leaf.get(), 0, sizeof(SerializedLeafNode)); // <-- ADD THIS after std::make_unique
+
+            if (!loadLeafFromDisk(path, *leaf))
             {
                 std::cout << indent << "[Leaf " << node.oid.off << " FAILED TO LOAD]\n";
                 return;
             }
 
             std::cout << indent << "[";
-            for (int i = 0; i < static_cast<int>(leaf.keyCount); ++i)
+            for (int i = 0; i < static_cast<int>(leaf->keyCount); ++i)
             {
-                std::cout << "(" << leaf.keys[i] << " -> " << leaf.values[i] << ") ";
+                std::cout << "(" << leaf->keys[i] << " -> " << leaf->values[i] << ") ";
             }
             std::cout << "]\n";
             return;
@@ -3162,6 +3147,7 @@ public:
 
     ErrorCode appendMessageToLeafBuffer(SerializedLeafNode &leaf, const message &msg)
     {
+        std::cout << "[LEAF BUFFER] calling appendMessageToLeafBuffer with buffer = " << leaf.buffer_offset << "\n";
         coalesceLeafBuffer(leaf);
         size_t msgSize = sizeof(message);
 
@@ -3175,7 +3161,7 @@ public:
         leaf.buffer_offset += msgSize;
         if (leaf.buffer_offset + msgSize >= NODE_BUFFER_SIZE)
         {
-            // std::cerr << "[LEAF BUFFER] will be in the next message => need to normalize\n";
+            std::cerr << "[LEAF BUFFER] will be in the next message => need to normalize\n";
             return ErrorCode::BufferFull;
         }
         return ErrorCode::Success;
@@ -3256,13 +3242,14 @@ public:
         // Sort vector by key
         std::sort(msgs.begin(), msgs.end(), [](const message &a, const message &b)
                   {
-            KeyType keyA, keyB;
-            std::memcpy(&keyA, a.key_data, sizeof(KeyType));
-            std::memcpy(&keyB, b.key_data, sizeof(KeyType));
-            return keyA < keyB; });
+                KeyType keyA, keyB;
+                std::memcpy(&keyA, a.key_data, sizeof(KeyType));
+                std::memcpy(&keyB, b.key_data, sizeof(KeyType));
+                return keyA < keyB; });
 
         // Prepare a temporary buffer to hold remaining unprocessed messages
-        char tempBuffer[NODE_BUFFER_SIZE];
+        std::vector<char> tempBuffer(NODE_BUFFER_SIZE);
+
         size_t tempOffset = 0;
 
         for (const auto &msg : msgs)
@@ -3292,7 +3279,7 @@ public:
                     if (leaf.keyCount >= MAX_KEYS_PER_NODE)
                     {
                         // Leaf full — cannot insert now. Re-buffer the message
-                        std::memcpy(tempBuffer + tempOffset, &msg, sizeof(message));
+                        std::memcpy(tempBuffer.data() + tempOffset, &msg, sizeof(message));
                         tempOffset += sizeof(message);
                         // std::cerr << "[NORMALIZE] Leaf full. Re-buffering key " << key << "\n";
                         continue;
@@ -3402,7 +3389,7 @@ public:
         }
 
         // Overwrite leaf buffer with remaining unprocessed messages
-        std::memcpy(leaf.buffer, tempBuffer, tempOffset);
+        std::memcpy(leaf.buffer, tempBuffer.data(), tempOffset);
         leaf.buffer_offset = tempOffset;
 
         // If no buffered messages remain, zero the buffer

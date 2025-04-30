@@ -32,13 +32,15 @@ POBJ_LAYOUT_TOID(bepsilon_layout, MessageToNodeEntry);
 POBJ_LAYOUT_TOID(bepsilon_layout, NodeFrequencyEntry);
 POBJ_LAYOUT_END(bepsilon_layout);
 
-#define MAX_NVM_MESSAGES 4
+#define MAX_NVM_MESSAGES 1000000
 #define MAX_KEY_SIZE 64
 #define MAX_VAL_SIZE 64
-#define MAX_KEYS_PER_NODE 4
-#define MAX_NODES 64
-#define MAX_MESSAGES 128
-#define NODE_BUFFER_SIZE 2 * 1024 * 1024  // 2MB
+#define MAX_KEYS_PER_NODE 1300
+#define NODE_BUFFER_SIZE (2 * 1024 * 1024) // 2MB buffer per node
+#define MAX_NODES 100000
+#define MAX_MESSAGES 1000000
+
+
 
 struct message {
     uint8_t opCode;
@@ -70,7 +72,7 @@ struct NodeFrequencyEntry {
 
 struct PMEMRoot {
     TOID(PersistentNode) persistentRoot;
-    
+
     // Shared buffer
     TOID(message) messages[MAX_NVM_MESSAGES];
     int messageCount;
