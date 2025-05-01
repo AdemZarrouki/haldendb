@@ -3417,6 +3417,21 @@ public:
     }
 
 public:
+template <typename T>
+    void decodeAndPrint(const char *data, size_t size)
+    {
+        if (size == sizeof(T))
+        {
+            T val;
+            std::memcpy(&val, data, sizeof(T));
+            std::cout << val;
+        }
+        else
+        {
+            std::cout << "(size mismatch)";
+        }
+    }
+
     void printSSDLeaf(uint64_t nodeId)
     {
         std::string path = getLeafFilePathFromID(nodeId);
@@ -3466,23 +3481,12 @@ public:
             }
 
             std::cout << " | Key: ";
-            if (msg.key_size == sizeof(int))
-            {
-                int k;
-                std::memcpy(&k, msg.key_data, sizeof(int));
-                std::cout << k;
-            }
-            else
-            {
-                std::cout << "(unknown)";
-            }
+            decodeAndPrint<KeyType>(msg.key_data, msg.key_size);
 
             std::cout << " | Value: ";
-            if (msg.opCode != static_cast<uint8_t>(Operations::Delete) && msg.val_size == sizeof(int))
+            if (msg.opCode != static_cast<uint8_t>(Operations::Delete))
             {
-                int v;
-                std::memcpy(&v, msg.val_data, sizeof(int));
-                std::cout << v;
+                decodeAndPrint<ValueType>(msg.val_data, msg.val_size);
             }
             else
             {
@@ -3490,11 +3494,11 @@ public:
             }
 
             std::cout << "\n";
-
             offset += sizeof(message);
         }
 
         if (offset == 0)
             std::cout << "  (empty buffer)\n";
     }
-};
+
+    };
