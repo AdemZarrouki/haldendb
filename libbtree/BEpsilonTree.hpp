@@ -628,6 +628,7 @@ public:
     // DELETE OP
     ErrorCode remove(KeyType key)
     {
+        auto entered = false;
         if (isReplaying)
             return ErrorCode::Success;
 
@@ -641,6 +642,7 @@ public:
 
         if (isSSDLeaf(persistentRoot.oid.off))
         {
+            entered = true;
             std::string path = getLeafFilePathFromID(persistentRoot.oid.off);
             auto leaf = std::make_unique<SerializedLeafNode>();
             std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
@@ -726,14 +728,43 @@ public:
             return ErrorCode::Error;
         }
 
-        ErrorCode res = insertToNVMSharedBuffer(Operations::Delete, key);
-        if (res != ErrorCode::Success)
-            return res;
+        uint64_t node_id = bufferTarget.oid.off;
+        if (volatileNodes.find(node_id) != volatileNodes.end())
+        {
+            auto &vNode = volatileNodes[node_id];
+            if (vNode->dramMessageCount >= MAX_DRAM_MESSAGES)
+            {
+                std::cout << "[REMOVE] DRAM buffer full for node " << node_id << ". Flushing...\n";
+                ErrorCode flushRes = flushVolatileNodeBuffer(node_id);
+                if (flushRes != ErrorCode::Success)
+                    return flushRes;
+            }
 
-        uint64_t node_id = getNodeIDFromPersistentNode(bufferTarget);
-        addKeyToNodeMessageMap(node_id, key);
-        insertToMessageToNodeMap(static_cast<uint64_t>(key), node_id);
-        incrementNodeFrequency(node_id);
+            message msg;
+            msg.opCode = static_cast<uint8_t>(Operations::Delete);
+            msg.key_size = sizeof(KeyType);
+            msg.val_size = 0;
+            std::memcpy(msg.key_data, &key, sizeof(KeyType));
+
+            vNode->dramBuffer[vNode->dramMessageCount++] = msg;
+            std::cout << "[REMOVE] Buffered delete in DRAM node " << node_id << " (total: " << vNode->dramMessageCount << ")\n";
+
+            maybeCheckpoint();
+            return ErrorCode::Success;
+        }
+        if (!entered)
+        {
+            ValueType dummy;
+            std::memset(&dummy, 0, sizeof(ValueType));
+            ErrorCode res = insertToNVMSharedBuffer(Operations::Delete, key, dummy);
+
+            if (res != ErrorCode::Success)
+                return res;
+
+            addKeyToNodeMessageMap(node_id, key);
+            insertToMessageToNodeMap(static_cast<uint64_t>(key), node_id);
+            incrementNodeFrequency(node_id);
+        }
 
         maybeCheckpoint();
 
@@ -951,13 +982,139 @@ public:
         vNode->keyCount = pnodePtr->keyCount;
         std::memcpy(vNode->keys, pnodePtr->keys, sizeof(vNode->keys));
         std::memcpy(vNode->children, pnodePtr->children, sizeof(vNode->children));
+        vNode->dramMessageCount = 0;
+        auto bufferedKeys = getBufferedKeysForNode(node_id);
+        for (const auto &key : bufferedKeys)
+        {
+            auto msgOpt = lookupInNVMBuffer(key);
+            if (!msgOpt.has_value())
+                continue;
+
+            auto [op, val] = msgOpt.value();
+
+            if (vNode->dramMessageCount < MAX_DRAM_MESSAGES)
+            {
+                message msg;
+                msg.opCode = static_cast<uint8_t>(op);
+                msg.key_size = sizeof(KeyType);
+                msg.val_size = (op == Operations::Delete ? 0 : sizeof(ValueType));
+                std::memcpy(msg.key_data, &key, sizeof(KeyType));
+                if (op != Operations::Delete)
+                    std::memcpy(msg.val_data, &val, sizeof(ValueType));
+                vNode->dramBuffer[vNode->dramMessageCount++] = msg;
+                removeFromNVMBuffer(key);
+                removeKeyFromMessageToNodeMap(key);
+                removeKeyFromNodeMessageMap(node_id, key);
+            }
+            else
+            {
+                std::cerr << "[MIGRATE] DRAM buffer full for node " << node_id << ", message for key " << key << " not copied.\n";
+            }
+        }
 
         volatileNodes[node_id] = vNode;
 
-        std::cout << "[MIGRATE] Migrated node " << node_id << " to DRAM.\n";
+        std::cout << "[MIGRATE] Node " << node_id << " migrated to DRAM with " << vNode->dramMessageCount << " buffered messages.\n";
+        ;
         // printNVMSharedBuffer();
         // displayPersistentTreeWithLeaves();
         // printVolatileNodesWithKeys();
+    }
+
+    ErrorCode flushVolatileNodeBuffer(uint64_t node_id)
+    {
+        std::cout << "[DEBUG] flushVolatileNodeBuffer called for " << node_id << "\n";
+        std::cout << "[DEBUG] Current volatileNodes keys: ";
+        for (const auto &[id, _] : volatileNodes)
+            std::cout << id << " ";
+        std::cout << "\n";
+
+        if (volatileNodes.find(node_id) == volatileNodes.end())
+        {
+            std::cerr << "[FLUSH DRAM] No VolatileNode found for " << node_id << "\n";
+            return ErrorCode::Error;
+        }
+
+        auto &vNode = volatileNodes[node_id];
+        coalesceVolatileNodeBuffer(vNode);
+        for (int i = 0; i < vNode->dramMessageCount; ++i)
+        {
+            message &msg = vNode->dramBuffer[i];
+
+            KeyType key;
+            std::memcpy(&key, msg.key_data, sizeof(KeyType));
+
+            // Step 1: Find correct SSD leaf for the key
+            TOID(PersistentNode)
+            leafNode = findLeafNodeForKey(persistentRoot, key);
+            if (TOID_IS_NULL(leafNode) || !isSSDLeaf(leafNode.oid.off))
+            {
+                std::cerr << "[FLUSH DRAM] Invalid leaf node for key " << key << "\n";
+                continue;
+            }
+
+            std::string leafPath = getLeafFilePathFromID(leafNode.oid.off);
+            auto leaf = std::make_unique<SerializedLeafNode>();
+            std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
+
+            if (!loadLeafFromDisk(leafPath, *leaf))
+            {
+                std::cerr << "[FLUSH DRAM] Failed to load SSD leaf for key " << key << "\n";
+                continue;
+            }
+
+            // Step 2: Append message
+            ErrorCode result = appendMessageToLeafBuffer(*leaf, msg);
+
+            // Step 3: Normalize if full
+            if (result == ErrorCode::BufferFull)
+            {
+                std::cout << "[FLUSH DRAM] SSD leaf full — normalizing before retry (key=" << key << ")\n";
+                ErrorCode normRes = normalizeLeafBuffer(*leaf, leafNode.oid.off);
+                if (normRes != ErrorCode::Success)
+                {
+                    std::cerr << "[FLUSH DRAM] Failed to normalize SSD leaf for key " << key << "\n";
+                    continue;
+                }
+
+                result = appendMessageToLeafBuffer(*leaf, msg);
+                if (result == ErrorCode::BufferFull)
+                {
+                    std::cerr << "[FLUSH DRAM] Leaf still full after normalization — splitting (key=" << key << ")\n";
+                    if (!saveLeafToDisk(leafPath, *leaf))
+                    {
+                        std::cerr << "[FLUSH DRAM] Failed to save before split\n";
+                        continue;
+                    }
+
+                    ErrorCode splitRes = splitSSDLeaf(findTargetInternalNodeForKey(persistentRoot, key),
+                                                      leafNode.oid.off, key);
+                    if (splitRes != ErrorCode::Success)
+                    {
+                        std::cerr << "[FLUSH DRAM] SSD leaf split failed for key " << key << "\n";
+                        continue;
+                    }
+
+                    // No retry — this message will be re-buffered in shared buffer or flushed in next round
+                    continue;
+                }
+            }
+
+            // Step 4: Persist updated SSD leaf
+            if (!saveLeafToDisk(leafPath, *leaf))
+            {
+                std::cerr << "[FLUSH DRAM] Failed to save SSD leaf after flush\n";
+            }
+        }
+
+        // Step 5: Clear DRAM buffer
+        vNode->dramMessageCount = 0;
+        std::memset(vNode->dramBuffer, 0, sizeof(vNode->dramBuffer));
+
+        std::cout << "[FLUSH DRAM] Flushed " << node_id << " with "
+                  << vNode->dramMessageCount << " messages\n";
+
+        return ErrorCode::Success;
     }
 
     ErrorCode mergeNodes(TOID(PersistentNode) parent, int index)
@@ -1142,6 +1299,7 @@ public:
     // UPDATE OP
     ErrorCode update(KeyType key, ValueType newValue)
     {
+        auto entered = false;
         if (isReplaying)
             return ErrorCode::Success;
 
@@ -1150,13 +1308,14 @@ public:
         // Tree is empty
         if (TOID_IS_NULL(persistentRoot))
         {
-            std::cerr << "[UPDATE] Cannot update — tree is empty.\n";
+            std::cerr << "[UPDATE] Cannot update as tree is empty.\n";
             return ErrorCode::KeyDoesNotExist;
         }
 
         // SSD leaf root
         if (isSSDLeaf(persistentRoot.oid.off))
         {
+            entered = true;
             std::string path = getLeafFilePathFromID(persistentRoot.oid.off);
             auto leaf = std::make_unique<SerializedLeafNode>();
             std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
@@ -1233,7 +1392,7 @@ public:
             maybeCheckpoint();
             return ErrorCode::Success;
         }
-    // Fallback: buffer into shared buffer
+        // Fallback: buffer into shared buffer
     buffered_update:
         pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
         persistentRoot = D_RW(pmemRoot)->persistentRoot;
@@ -1253,9 +1412,46 @@ public:
             return ErrorCode::Error;
         }
 
-        ErrorCode res = insertToNVMSharedBuffer(Operations::Update, key, newValue);
-        if (res != ErrorCode::Success)
-            return res;
+        uint64_t node_id = bufferTarget.oid.off;
+        // ✅ If it's a hot node (in DRAM), buffer locally
+        if (volatileNodes.find(node_id) != volatileNodes.end())
+        {
+            auto &vNode = volatileNodes[node_id];
+
+            if (vNode->dramMessageCount >= MAX_DRAM_MESSAGES)
+            {
+                std::cout << "[UPDATE] DRAM buffer full for node " << node_id << ". Flushing...\n";
+                ErrorCode flushRes = flushVolatileNodeBuffer(node_id);
+                if (flushRes != ErrorCode::Success)
+                {
+                    std::cerr << "[UPDATE] Failed to flush DRAM buffer for node " << node_id << "\n";
+                    return flushRes;
+                }
+            }
+
+            // Create insert message and store it
+            message msg;
+            msg.opCode = static_cast<uint8_t>(Operations::Update);
+            msg.key_size = sizeof(KeyType);
+            msg.val_size = sizeof(ValueType);
+            std::memcpy(msg.key_data, &key, sizeof(KeyType));
+            std::memcpy(msg.val_data, &newValue, sizeof(ValueType));
+
+            vNode->dramBuffer[vNode->dramMessageCount++] = msg;
+            std::cout << "[UPDATE] Buffered update in DRAM node " << node_id
+                      << " (total: " << vNode->dramMessageCount << ")\n";
+            ;
+
+            maybeCheckpoint();
+            return ErrorCode::Success;
+        }
+
+        if (!entered)
+        {
+            ErrorCode res = insertToNVMSharedBuffer(Operations::Update, key, newValue);
+            if (res != ErrorCode::Success)
+                return res;
+        }
 
         maybeCheckpoint();
         return ErrorCode::Success;
@@ -1306,10 +1502,9 @@ public:
 
         if (isSSDLeaf(child.oid.off))
         {
-            // At the SSD leaf level: load the leaf file and search
             std::string path = getLeafFilePathFromID(child.oid.off);
             auto leaf = std::make_unique<SerializedLeafNode>();
-            std::memset(leaf.get(), 0, sizeof(SerializedLeafNode)); // <-- ADD THIS after std::make_unique
+            std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
 
             if (!loadLeafFromDisk(path, *leaf))
             {
@@ -1317,6 +1512,23 @@ public:
                 return ErrorCode::Error;
             }
 
+            // Step 1: Check in-place buffer
+            auto msg = lookupInLeafBuffer(*leaf, key);
+            if (msg.has_value())
+            {
+                auto [op, val] = msg.value();
+                if (op == Operations::Insert || op == Operations::Update)
+                {
+                    value = val;
+                    return ErrorCode::Success;
+                }
+                if (op == Operations::Delete)
+                {
+                    return ErrorCode::KeyDoesNotExist;
+                }
+            }
+
+            // Step 2: Check committed keys
             for (int j = 0; j < static_cast<int>(leaf->keyCount); ++j)
             {
                 if (leaf->keys[j] == static_cast<uint64_t>(key))
@@ -1325,8 +1537,10 @@ public:
                     return ErrorCode::Success;
                 }
             }
+
             return ErrorCode::KeyDoesNotExist;
         }
+
         else
         {
             // Still an internal node -> recurse
@@ -1350,7 +1564,7 @@ public:
             return ErrorCode::Success;
         }
 
-        // 2. NVM shared buffer: check for unflushed message
+        // 2. NVM shared buffer
         auto bufferedMessage = lookupInNVMBuffer(key);
         if (bufferedMessage.has_value())
         {
@@ -1367,21 +1581,57 @@ public:
             }
         }
 
-        // 3. SSD-based persistent tree traversal
+        // 3. DRAM hot node buffer
+        auto dramMessage = lookupInDRAMBuffer(key);
+        if (dramMessage.has_value())
+        {
+            auto [op, val] = dramMessage.value();
+            if (op == Operations::Insert || op == Operations::Update)
+            {
+                value = val;
+                updateReadCache(key, value);
+                return ErrorCode::Success;
+            }
+            if (op == Operations::Delete)
+            {
+                return ErrorCode::KeyDoesNotExist;
+            }
+        }
+
+        // 4. SSD-based persistent tree
         if (!TOID_IS_NULL(persistentRoot))
         {
             if (isSSDLeaf(persistentRoot.oid.off))
             {
-                // Special case: root is an SSD leaf
+                // Root is SSD leaf
                 std::string path = getLeafFilePathFromID(persistentRoot.oid.off);
                 auto leaf = std::make_unique<SerializedLeafNode>();
-                std::memset(leaf.get(), 0, sizeof(SerializedLeafNode)); // <-- ADD THIS after std::make_unique
+                std::memset(leaf.get(), 0, sizeof(SerializedLeafNode));
 
                 if (!loadLeafFromDisk(path, *leaf))
                 {
                     std::cerr << "[SEARCH] Failed to load SSD root leaf from: " << path << "\n";
                     return ErrorCode::Error;
                 }
+
+                // 4a. Check buffer FIRST (it may shadow committed keys)
+                auto msg = lookupInLeafBuffer(*leaf, key);
+                if (msg.has_value())
+                {
+                    auto [op, val] = msg.value();
+                    if (op == Operations::Insert || op == Operations::Update)
+                    {
+                        value = val;
+                        updateReadCache(key, value);
+                        return ErrorCode::Success;
+                    }
+                    if (op == Operations::Delete)
+                    {
+                        return ErrorCode::KeyDoesNotExist;
+                    }
+                }
+
+                // 4b. Check committed keys if no shadowing message
                 for (int j = 0; j < static_cast<int>(leaf->keyCount); ++j)
                 {
                     if (leaf->keys[j] == static_cast<uint64_t>(key))
@@ -1391,10 +1641,12 @@ public:
                         return ErrorCode::Success;
                     }
                 }
+
                 return ErrorCode::KeyDoesNotExist;
             }
             else
             {
+                // Recursively traverse internal nodes
                 ErrorCode result = searchRecursive(persistentRoot, key, value);
                 if (result == ErrorCode::Success)
                 {
@@ -1405,6 +1657,39 @@ public:
         }
 
         return ErrorCode::KeyDoesNotExist;
+    }
+
+    std::optional<std::pair<Operations, ValueType>> lookupInDRAMBuffer(KeyType key)
+    {
+        for (const auto &[node_id, vNode] : volatileNodes)
+        {
+            for (size_t i = 0; i < vNode->dramMessageCount; ++i)
+            {
+                const message &msg = vNode->dramBuffer[i];
+
+                if (msg.key_size != sizeof(KeyType))
+                    continue;
+
+                KeyType msgKey;
+                std::memcpy(&msgKey, msg.key_data, sizeof(KeyType));
+                if (msgKey != key)
+                    continue;
+
+                if (msg.opCode == static_cast<uint8_t>(Operations::Delete))
+                {
+                    return std::make_optional(std::make_pair(Operations::Delete, ValueType{}));
+                }
+
+                if (msg.opCode == static_cast<uint8_t>(Operations::Insert) ||
+                    msg.opCode == static_cast<uint8_t>(Operations::Update))
+                {
+                    ValueType val;
+                    std::memcpy(&val, msg.val_data, sizeof(ValueType));
+                    return std::make_optional(std::make_pair(static_cast<Operations>(msg.opCode), val));
+                }
+            }
+        }
+        return std::nullopt;
     }
 
     // RANGE QUERY
@@ -1514,6 +1799,7 @@ public:
 
     ErrorCode insert(KeyType key, ValueType value)
     {
+        auto entered = false;
         if (isReplaying)
             return ErrorCode::Success;
 
@@ -1541,7 +1827,7 @@ public:
         // SSD leaf root
         if (isSSDLeaf(persistentRoot.oid.off))
         {
-
+            entered = true;
             std::string path = getLeafFilePathFromID(persistentRoot.oid.off);
             auto leaf = std::make_unique<SerializedLeafNode>();
 
@@ -1658,13 +1944,49 @@ public:
             return ErrorCode::Error;
         }
 
-        // Buffer the insert
-        ErrorCode res = insertToNVMSharedBuffer(Operations::Insert, key, value);
-        if (res != ErrorCode::Success)
-            return res;
+        uint64_t node_id = bufferTarget.oid.off;
+
+        // If it's a hot node (in DRAM), buffer locally
+        if (volatileNodes.find(node_id) != volatileNodes.end())
+        {
+            auto &vNode = volatileNodes[node_id];
+
+            if (vNode->dramMessageCount >= MAX_DRAM_MESSAGES)
+            {
+                std::cout << "[INSERT] DRAM buffer full for node " << node_id << ". Flushing...\n";
+                ErrorCode flushRes = flushVolatileNodeBuffer(node_id);
+                if (flushRes != ErrorCode::Success)
+                {
+                    std::cerr << "[INSERT] Failed to flush DRAM buffer for node " << node_id << "\n";
+                    return flushRes;
+                }
+            }
+
+            // Create insert message and store it
+            message msg;
+            msg.opCode = static_cast<uint8_t>(Operations::Insert);
+            msg.key_size = sizeof(KeyType);
+            msg.val_size = sizeof(ValueType);
+            std::memcpy(msg.key_data, &key, sizeof(KeyType));
+            std::memcpy(msg.val_data, &value, sizeof(ValueType));
+
+            vNode->dramBuffer[vNode->dramMessageCount++] = msg;
+            std::cout << "[INSERT] Buffered insert in DRAM node " << node_id
+                      << " (total: " << vNode->dramMessageCount << ")\n";
+
+            maybeCheckpoint();
+            return ErrorCode::Success;
+        }
+
+        // Fallback: Use shared buffer in NVM
+        if (!entered)
+        {
+            ErrorCode res = insertToNVMSharedBuffer(Operations::Insert, key, value);
+            if (res != ErrorCode::Success)
+                return res;
+        }
 
         maybeCheckpoint();
-
         return ErrorCode::Success;
     }
 
@@ -1966,6 +2288,40 @@ public:
         }
 
         return std::nullopt; // Not found
+    }
+
+    std::optional<std::pair<Operations, ValueType>> lookupInLeafBuffer(const SerializedLeafNode &leaf, KeyType key)
+    {
+        size_t offset = 0;
+
+        while (offset + sizeof(message) <= leaf.buffer_offset)
+        {
+            message msg;
+            std::memcpy(&msg, leaf.buffer + offset, sizeof(message));
+            offset += sizeof(message);
+
+            if (msg.key_size != sizeof(KeyType))
+                continue;
+
+            KeyType msgKey;
+            std::memcpy(&msgKey, msg.key_data, sizeof(KeyType));
+
+            if (msgKey != key)
+                continue;
+
+            if (msg.opCode == static_cast<uint8_t>(Operations::Delete))
+                return std::pair(Operations::Delete, ValueType{});
+
+            if (msg.opCode == static_cast<uint8_t>(Operations::Insert) ||
+                msg.opCode == static_cast<uint8_t>(Operations::Update))
+            {
+                ValueType val;
+                std::memcpy(&val, msg.val_data, sizeof(ValueType));
+                return std::pair(static_cast<Operations>(msg.opCode), val);
+            }
+        }
+
+        return std::nullopt;
     }
 
     ErrorCode flushMostBufferedNode()
@@ -3311,8 +3667,16 @@ public:
 
         if (leaf.buffer_offset + msgSize >= NODE_BUFFER_SIZE)
         {
-            std::cerr << "[LEAF BUFFER] Buffer full. Cannot append message.\n";
-            return ErrorCode::BufferFull;
+            // Try coalescing to reclaim space
+            std::cout << "[LEAF BUFFER] Attempting coalescing before rejecting insert...\n";
+            coalesceLeafBuffer(leaf);
+
+            // Re-check after coalescing
+            if (leaf.buffer_offset + msgSize >= NODE_BUFFER_SIZE)
+            {
+                std::cerr << "[LEAF BUFFER] Buffer still full. Cannot append message.\n";
+                return ErrorCode::BufferFull;
+            }
         }
 
         std::memcpy(leaf.buffer + leaf.buffer_offset, &msg, msgSize);
@@ -3559,19 +3923,51 @@ public:
         return ErrorCode::Success;
     }
 
-    ErrorCode reappendMessageToLeafBuffer(SerializedLeafNode &leaf, const message &msg)
+    void coalesceVolatileNodeBuffer(std::shared_ptr<VolatileNode> &vNode)
     {
-        size_t msgSize = sizeof(message);
+        std::unordered_map<KeyType, message> finalMessages;
 
-        if (leaf.buffer_offset + msgSize > NODE_BUFFER_SIZE)
+        for (size_t i = 0; i < vNode->dramMessageCount; ++i)
         {
-            std::cerr << "[LEAF BUFFER] Cannot reappend message — buffer completely full!\n";
-            return ErrorCode::BufferFull;
+            const message &msg = vNode->dramBuffer[i];
+
+            if (msg.key_size != sizeof(KeyType))
+                continue;
+
+            KeyType key;
+            std::memcpy(&key, msg.key_data, sizeof(KeyType));
+
+            Operations op = static_cast<Operations>(msg.opCode);
+
+            auto it = finalMessages.find(key);
+            if (it != finalMessages.end())
+            {
+                Operations prevOp = static_cast<Operations>(it->second.opCode);
+
+                if ((prevOp == Operations::Insert || prevOp == Operations::Upsert) && op == Operations::Delete)
+                {
+                    finalMessages.erase(key);
+                    continue;
+                }
+
+                if (prevOp == Operations::Insert && op == Operations::Update)
+                {
+                    std::memcpy(it->second.val_data, msg.val_data, sizeof(ValueType));
+                    continue;
+                }
+            }
+
+            finalMessages[key] = msg;
         }
 
-        std::memcpy(leaf.buffer + leaf.buffer_offset, &msg, msgSize);
-        leaf.buffer_offset += msgSize;
-        return ErrorCode::Success;
+        // Write coalesced messages back
+        vNode->dramMessageCount = 0;
+        for (const auto &[key, msg] : finalMessages)
+        {
+            vNode->dramBuffer[vNode->dramMessageCount++] = msg;
+        }
+
+        std::cout << "[COALESCE] DRAM buffer coalesced to " << vNode->dramMessageCount << " messages.\n";
     }
 
 public:
@@ -3657,5 +4053,67 @@ public:
 
         if (offset == 0)
             std::cout << "  (empty buffer)\n";
+    }
+    void printVolatileNodesWithKeys()
+    {
+        std::cout << "\n--- [DEBUG] DRAM Working Copies (Volatile Nodes) ---\n";
+
+        if (volatileNodes.empty())
+        {
+            std::cout << "(no DRAM nodes)\n";
+            return;
+        }
+
+        for (const auto &[node_id, vNode] : volatileNodes)
+        {
+            std::cout << "NodeID [" << node_id << "] ";
+
+            if (vNode->isLeaf)
+                std::cout << "(Leaf)";
+            else
+                std::cout << "(Internal)";
+
+            std::cout << " | Keys: [";
+            for (size_t i = 0; i < vNode->keyCount; ++i)
+                std::cout << vNode->keys[i] << (i < vNode->keyCount - 1 ? ", " : "");
+            std::cout << "]";
+
+            std::cout << " | dramBuffer count: " << vNode->dramMessageCount << "\n";
+
+            for (int i = 0; i < vNode->dramMessageCount; ++i)
+            {
+                const message &msg = vNode->dramBuffer[i];
+                KeyType key;
+                ValueType val{};
+                std::memcpy(&key, msg.key_data, sizeof(KeyType));
+                if (msg.opCode != static_cast<uint8_t>(Operations::Delete))
+                    std::memcpy(&val, msg.val_data, sizeof(ValueType));
+
+                std::cout << "   [" << i << "] Op: ";
+                switch (msg.opCode)
+                {
+                case static_cast<uint8_t>(Operations::Insert):
+                    std::cout << "Insert";
+                    break;
+                case static_cast<uint8_t>(Operations::Update):
+                    std::cout << "Update";
+                    break;
+                case static_cast<uint8_t>(Operations::Delete):
+                    std::cout << "Delete";
+                    break;
+                case static_cast<uint8_t>(Operations::Upsert):
+                    std::cout << "Upsert";
+                    break;
+                default:
+                    std::cout << "Unknown(" << (int)msg.opCode << ")";
+                    break;
+                }
+
+                std::cout << " | Key: " << key;
+                if (msg.opCode != static_cast<uint8_t>(Operations::Delete))
+                    std::cout << " | Value: " << val;
+                std::cout << "\n";
+            }
+        }
     }
 };
