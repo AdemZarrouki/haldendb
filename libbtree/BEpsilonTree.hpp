@@ -54,6 +54,8 @@ public:
     std::list<KeyType> lruList;
     size_t maxReadCacheSize = 100;
     std::unordered_map<uint64_t, std::shared_ptr<VolatileNode>> volatileNodes;
+    int totalHotPromoted = 0;
+    int totalHotEvicted = 0;
 
     BEpsilonTree(int degree, const std::string &filename, int checkpointFreq = -1)
     {
@@ -958,6 +960,15 @@ public:
             return;
         }
 
+        // Evict if DRAM cache is full
+        if (volatileNodes.size() >= MAX_HOT_NODES)
+        {
+            uint64_t evict_id = volatileNodes.begin()->first;
+            flushVolatileNodeBuffer(evict_id);
+            evictVolatileNodeToNVM(evict_id);
+            totalHotEvicted++;
+        }
+
         TOID(PersistentNode)
         pnode;
         pnode.oid.off = node_id;
@@ -1011,14 +1022,64 @@ public:
                 std::cerr << "[MIGRATE] DRAM buffer full for node " << node_id << ", message for key " << key << " not copied.\n";
             }
         }
+        for (const auto &[existing_id, existing_node] : volatileNodes)
+        {
+            if (existing_node->keyCount == vNode->keyCount &&
+                std::equal(existing_node->keys, existing_node->keys + vNode->keyCount, vNode->keys))
+            {
+                std::cerr << "[MIGRATE WARNING] Skipping promotion of duplicate logical node.\n";
+                std::cerr << "  Existing ID: " << existing_id << " | New ID: " << node_id << "\n";
+                std::cerr << "  Keys: [";
+                for (int i = 0; i < vNode->keyCount; ++i)
+                    std::cerr << vNode->keys[i] << " ";
+                std::cerr << "]\n";
+                return;
+            }
+        }
 
         volatileNodes[node_id] = vNode;
+        totalHotPromoted++;
 
         std::cout << "[MIGRATE] Node " << node_id << " migrated to DRAM with " << vNode->dramMessageCount << " buffered messages.\n";
         ;
         // printNVMSharedBuffer();
         // displayPersistentTreeWithLeaves();
         // printVolatileNodesWithKeys();
+    }
+
+    void syncVolatileNodeFromPersistent(uint64_t node_id)
+    {
+        if (volatileNodes.find(node_id) == volatileNodes.end())
+        {
+            std::cerr << "[SYNC] No VolatileNode exists for " << node_id << " — skipping sync.\n";
+            return;
+        }
+
+        TOID(PersistentNode)
+        pnode;
+        pnode.oid.off = node_id;
+        pnode.oid.pool_uuid_lo = poolUUID;
+
+        if (TOID_IS_NULL(pnode))
+        {
+            std::cerr << "[SYNC] Invalid TOID for node ID " << node_id << "\n";
+            return;
+        }
+
+        auto *pnodePtr = D_RO(pnode);
+        if (!pnodePtr)
+        {
+            std::cerr << "[SYNC] Failed to read PersistentNode for " << node_id << "\n";
+            return;
+        }
+
+        auto &vNode = volatileNodes[node_id];
+
+        vNode->keyCount = pnodePtr->keyCount;
+        std::memcpy(vNode->keys, pnodePtr->keys, sizeof(vNode->keys));
+        std::memcpy(vNode->children, pnodePtr->children, sizeof(vNode->children));
+
+        std::cout << "[SYNC] VolatileNode " << node_id << " synchronized with PersistentNode structure.\n";
     }
 
     ErrorCode flushVolatileNodeBuffer(uint64_t node_id)
@@ -1095,7 +1156,7 @@ public:
                         continue;
                     }
 
-                    // No retry — this message will be re-buffered in shared buffer or flushed in next round
+                    // message will be handled in next flush
                     continue;
                 }
             }
@@ -1111,8 +1172,10 @@ public:
         vNode->dramMessageCount = 0;
         std::memset(vNode->dramBuffer, 0, sizeof(vNode->dramBuffer));
 
-        std::cout << "[FLUSH DRAM] Flushed " << node_id << " with "
-                  << vNode->dramMessageCount << " messages\n";
+        std::cout << "[FLUSH DRAM] Flushed " << node_id << " with 0 messages\n";
+
+        // Step 6: Sync structure in case splits occurred
+        syncVolatileNodeFromPersistent(node_id);
 
         return ErrorCode::Success;
     }
@@ -1690,6 +1753,45 @@ public:
             }
         }
         return std::nullopt;
+    }
+
+    void evictVolatileNodeToNVM(uint64_t node_id)
+    {
+        if (volatileNodes.find(node_id) == volatileNodes.end())
+        {
+            std::cerr << "[EVICTION] No VolatileNode found for ID " << node_id << std::endl;
+            return;
+        }
+
+        auto &vNode = volatileNodes[node_id];
+        TOID(PersistentNode)
+        pnode;
+        pnode.oid.off = node_id;
+        pnode.oid.pool_uuid_lo = poolUUID;
+
+        if (TOID_IS_NULL(pnode))
+        {
+            std::cerr << "[EVICTION] Invalid TOID for node ID " << node_id << std::endl;
+            return;
+        }
+
+        if (vNode->dramMessageCount > 0)
+        {
+            std::cerr << "[EVICTION WARNING] Buffer not empty for node " << node_id << ". Flushing first.\n";
+            flushVolatileNodeBuffer(node_id);
+        }
+
+        // Write back structure manually
+        PersistentNode *p = D_RW(pnode);
+        p->keyCount = vNode->keyCount;
+        std::memcpy(p->keys, vNode->keys, sizeof(vNode->keys));
+        std::memcpy(p->children, vNode->children, sizeof(vNode->children));
+
+        // Persist changes
+        pmemobj_persist(pmemPoolHandle, p, sizeof(PersistentNode));
+
+        volatileNodes.erase(node_id);
+        std::cout << "[EVICTION] VolatileNode " << node_id << " evicted and synced to NVM.\n";
     }
 
     // RANGE QUERY
@@ -4115,5 +4217,11 @@ public:
                 std::cout << "\n";
             }
         }
+    }
+    void printHotNodeStats() const
+    {
+        std::cout << "[HOT NODES] In DRAM: " << volatileNodes.size()
+                  << " | Promoted: " << totalHotPromoted
+                  << " | Evicted: " << totalHotEvicted << std::endl;
     }
 };

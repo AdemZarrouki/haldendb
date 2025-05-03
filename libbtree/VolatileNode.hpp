@@ -3,11 +3,11 @@
 #include <iostream>
 #include <cstring>
 
-#define HOT_NODE_THRESHOLD 100
+#define HOT_NODE_THRESHOLD 10
 #define MAX_DRAM_MESSAGES 5
+#define MAX_HOT_NODES 3
 
-struct VolatileNode
-{
+struct VolatileNode {
     bool isLeaf;
     size_t keyCount;
     uint64_t keys[MAX_KEYS_PER_NODE];
@@ -16,8 +16,7 @@ struct VolatileNode
     int dramMessageCount;
 
     VolatileNode()
-        : isLeaf(false), keyCount(0)
-    {
+        : isLeaf(false), keyCount(0) {
         std::memset(keys, 0, sizeof(keys));
         std::memset(children, 0, sizeof(children));
         std::memset(dramBuffer, 0, sizeof(dramBuffer));
