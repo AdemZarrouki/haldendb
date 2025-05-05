@@ -29,6 +29,7 @@
 #include <list>
 #include <optional>
 #include <sstream>
+#include <unordered_set>
 
 using namespace std;
 
@@ -56,6 +57,7 @@ public:
     std::unordered_map<uint64_t, std::shared_ptr<VolatileNode>> volatileNodes;
     int totalHotPromoted = 0;
     int totalHotEvicted = 0;
+    std::unordered_set<uint64_t> recentlyEvictedNodes;
 
     BEpsilonTree(int degree, const std::string &filename, int checkpointFreq = -1)
     {
@@ -1082,32 +1084,26 @@ public:
         std::cout << "[SYNC] VolatileNode " << node_id << " synchronized with PersistentNode structure.\n";
     }
 
-    ErrorCode flushVolatileNodeBuffer(uint64_t node_id)
+    /*ErrorCode flushVolatileNodeBuffer(uint64_t node_id)
     {
-        // std::cout << "[DEBUG] flushVolatileNodeBuffer called for " << node_id << "\n";
-        /*std::cout << "[DEBUG] Current volatileNodes keys: ";
-        for (const auto& [id, _] : volatileNodes)
-            std::cout << id << " ";
-        std::cout << "\n";*/
-
         if (volatileNodes.find(node_id) == volatileNodes.end())
         {
             std::cerr << "[FLUSH DRAM] No VolatileNode found for " << node_id << "\n";
             return ErrorCode::Error;
         }
 
-        auto &vNode = volatileNodes[node_id];
+        auto& vNode = volatileNodes[node_id];
         coalesceVolatileNodeBuffer(vNode);
         for (int i = 0; i < vNode->dramMessageCount; ++i)
         {
-            message &msg = vNode->dramBuffer[i];
+            message& msg = vNode->dramBuffer[i];
 
             KeyType key;
             std::memcpy(&key, msg.key_data, sizeof(KeyType));
 
             // Step 1: Find correct SSD leaf for the key
             TOID(PersistentNode)
-            leafNode = findLeafNodeForKey(persistentRoot, key);
+                leafNode = findLeafNodeForKey(persistentRoot, key);
             if (TOID_IS_NULL(leafNode) || !isSSDLeaf(leafNode.oid.off))
             {
                 std::cerr << "[FLUSH DRAM] Invalid leaf node for key " << key << "\n";
@@ -1141,7 +1137,7 @@ public:
                 result = appendMessageToLeafBuffer(*leaf, msg);
                 if (result == ErrorCode::BufferFull)
                 {
-                    std::cerr << "[FLUSH DRAM] Leaf still full after normalization — splitting (key=" << key << ")\n";
+                    std::cerr << "[FLUSH DRAM] Leaf still full after normalization - splitting (key=" << key << ")\n";
                     if (!saveLeafToDisk(leafPath, *leaf))
                     {
                         std::cerr << "[FLUSH DRAM] Failed to save before split\n";
@@ -1149,7 +1145,7 @@ public:
                     }
 
                     ErrorCode splitRes = splitSSDLeaf(findTargetInternalNodeForKey(persistentRoot, key),
-                                                      leafNode.oid.off, key);
+                        leafNode.oid.off, key);
                     if (splitRes != ErrorCode::Success)
                     {
                         std::cerr << "[FLUSH DRAM] SSD leaf split failed for key " << key << "\n";
@@ -1176,6 +1172,74 @@ public:
 
         // Step 6: Sync structure in case splits occurred
         syncVolatileNodeFromPersistent(node_id);
+        evictVolatileNodeToNVM(node_id);
+
+            return ErrorCode::Success;
+    }*/
+
+    // Updated flushVolatileNodeBuffer to route messages into NVM shared buffer
+    ErrorCode flushVolatileNodeBuffer(uint64_t node_id)
+    {
+        if (volatileNodes.find(node_id) == volatileNodes.end())
+        {
+            std::cerr << "[FLUSH DRAM] No VolatileNode found for " << node_id << "\n";
+            return ErrorCode::Error;
+        }
+
+        auto &vNode = volatileNodes[node_id];
+        coalesceVolatileNodeBuffer(vNode);
+
+        for (int i = 0; i < vNode->dramMessageCount; ++i)
+        {
+            message &msg = vNode->dramBuffer[i];
+
+            if (msg.key_size != sizeof(KeyType))
+                continue;
+
+            KeyType key;
+            std::memcpy(&key, msg.key_data, sizeof(KeyType));
+
+            ValueType val{};
+            if (msg.opCode != static_cast<uint8_t>(Operations::Delete))
+                std::memcpy(&val, msg.val_data, sizeof(ValueType));
+
+            Operations op = static_cast<Operations>(msg.opCode);
+
+            // Remove any old mapping
+            removeKeyFromAllNodeMessageMaps(key);
+            removeKeyFromMessageToNodeMap(key);
+
+            // Route to persistent NVM shared buffer
+            int retryCount = 0;
+            const int MAX_RETRIES = 3;
+            ErrorCode insertResult = ErrorCode::Error;
+            while (retryCount++ < MAX_RETRIES)
+            {
+                insertResult = insertToNVMSharedBuffer(op, key, val);
+                if (insertResult == ErrorCode::Success)
+                    break;
+
+                std::cerr << "[FLUSH DRAM] Retry " << retryCount << " for key=" << key << " into NVM buffer\n";
+                flushMostBufferedNode();
+            }
+
+            if (insertResult != ErrorCode::Success)
+            {
+                std::cerr << "[FLUSH DRAM] Failed to insert message for key=" << key << " after retries\n";
+                return ErrorCode::Error;
+            }
+        }
+
+        std::cout << "[FLUSH DRAM] Flushed " << node_id << " with " << vNode->dramMessageCount << " messages\n";
+
+        // Clear DRAM buffer
+        vNode->dramMessageCount = 0;
+        std::memset(vNode->dramBuffer, 0, sizeof(vNode->dramBuffer));
+
+        // Sync and evict the volatile node
+        syncVolatileNodeFromPersistent(node_id);
+        evictVolatileNodeToNVM(node_id);
+        printVolatileNodesWithKeys();
 
         return ErrorCode::Success;
     }
@@ -1781,17 +1845,29 @@ public:
             flushVolatileNodeBuffer(node_id);
         }
 
-        // Write back structure manually
         PersistentNode *p = D_RW(pnode);
         p->keyCount = vNode->keyCount;
         std::memcpy(p->keys, vNode->keys, sizeof(vNode->keys));
-        // std::memcpy(p->values, vNode->values, sizeof(vNode->values));
         std::memcpy(p->children, vNode->children, sizeof(vNode->children));
-
-        // Persist changes
         pmemobj_persist(pmemPoolHandle, p, sizeof(PersistentNode));
 
         volatileNodes.erase(node_id);
+
+        // Reset node frequency after eviction
+        TOID(PMEMRoot)
+        auxRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
+        auto *auxPtr = D_RW(auxRoot);
+        for (int i = 0; i < auxPtr->nodeFrequencyCount; ++i)
+        {
+            auto *entry = D_RW(auxPtr->nodeFrequencyMap[i]);
+            if (entry->node_id == node_id)
+            {
+                entry->frequency = 0;
+                pmemobj_persist(pmemPoolHandle, entry, sizeof(NodeFrequencyEntry));
+                break;
+            }
+        }
+        recentlyEvictedNodes.insert(node_id);
         std::cout << "[EVICTION] VolatileNode " << node_id << " evicted and synced to NVM.\n";
     }
 
@@ -2048,6 +2124,14 @@ public:
         }
 
         uint64_t node_id = bufferTarget.oid.off;
+
+        // Skip DRAM buffering if the node was recently evicted
+        if (recentlyEvictedNodes.find(node_id) != recentlyEvictedNodes.end())
+        {
+            std::cerr << "[INSERT] Node " << node_id << " was recently evicted. Using NVM shared buffer instead.\n";
+            recentlyEvictedNodes.erase(node_id); // prevent indefinite blocking
+            return insertToNVMSharedBuffer(Operations::Insert, key, value);
+        }
 
         // If it's a hot node (in DRAM), buffer locally
         if (volatileNodes.find(node_id) != volatileNodes.end())
@@ -3197,28 +3281,29 @@ public:
         return val;
     }
 
+    // Patched splitSSDLeaf with all safety checks and crash prevention
     ErrorCode splitSSDLeaf(TOID(PersistentNode) parent, uint64_t leafID, KeyType key)
     {
-        std::cerr << "[SPLIT] entered splitSSDLeaf " << leafID << "\n";
-
         std::string leafPath = getLeafFilePathFromID(leafID);
         auto original = std::make_unique<SerializedLeafNode>();
         std::memset(original.get(), 0, sizeof(SerializedLeafNode));
         if (!loadLeafFromDisk(leafPath, *original))
             return ErrorCode::Error;
 
-        // Normalize buffer first
-        if (original->buffer_offset > 0)
+        if (original->keyCount > MAX_KEYS_PER_NODE)
         {
-            if (normalizeLeafBuffer(*original, leafID) != ErrorCode::Success)
-                return ErrorCode::Error;
+            std::cerr << "[SPLIT] Corrupt keyCount in leaf " << leafID << "\n";
+            return ErrorCode::Error;
+        }
+        if (original->buffer_offset > NODE_BUFFER_SIZE)
+        {
+            std::cerr << "[SPLIT] buffer_offset too large in leaf " << leafID << "\n";
+            return ErrorCode::Error;
         }
 
-        if (original->keyCount < MAX_KEYS_PER_NODE)
-        {
-            std::cerr << "[SPLIT SSD] Leaf no longer full after normalization, aborting split.\n";
-            return ErrorCode::Success;
-        }
+        if (original->buffer_offset > 0)
+            if (normalizeLeafBuffer(*original, leafID) != ErrorCode::Success)
+                return ErrorCode::Error;
 
         int mid = original->keyCount / 2;
         auto sibling = std::make_unique<SerializedLeafNode>();
@@ -3228,113 +3313,87 @@ public:
 
         for (int i = 0; i < sibling->keyCount; ++i)
         {
+            if ((mid + i) >= MAX_KEYS_PER_NODE)
+            {
+                std::cerr << "[SPLIT] Index out of range when copying keys to sibling\n";
+                return ErrorCode::Error;
+            }
             sibling->keys[i] = original->keys[mid + i];
             sibling->values[i] = original->values[mid + i];
         }
         original->keyCount = mid;
 
-        uint64_t pivot = sibling->keys[0];
-
-        // Temporarily extract buffered messages
-        std::vector<message> msgsForOriginal, msgsForSibling;
         size_t offset = 0;
         while (offset + sizeof(message) <= original->buffer_offset)
         {
+            if (offset + sizeof(message) > NODE_BUFFER_SIZE)
+            {
+                std::cerr << "[SPLIT] buffer overread risk at offset " << offset << "\n";
+                break;
+            }
             message *msg = reinterpret_cast<message *>(original->buffer + offset);
-            KeyType bufferedKey;
-            std::memcpy(&bufferedKey, msg->key_data, sizeof(KeyType));
-            if (bufferedKey < pivot)
-                msgsForOriginal.push_back(*msg);
+            KeyType msgKey;
+            std::memcpy(&msgKey, msg->key_data, sizeof(KeyType));
+
+            if (msgKey >= sibling->keys[0])
+            {
+                if (appendMessageToLeafBuffer(*sibling, *msg) != ErrorCode::Success)
+                    std::cerr << "[SPLIT] Failed to copy buffer msg to sibling\n";
+            }
             else
-                msgsForSibling.push_back(*msg);
+            {
+                if (appendMessageToLeafBuffer(*original, *msg) != ErrorCode::Success)
+                    std::cerr << "[SPLIT] Failed to re-append buffer msg to original\n";
+            }
             offset += sizeof(message);
         }
 
-        // Reset buffers before reinserting
-        original->buffer_offset = 0;
-        sibling->buffer_offset = 0;
-        std::memset(original->buffer, 0, NODE_BUFFER_SIZE);
-        std::memset(sibling->buffer, 0, NODE_BUFFER_SIZE);
-
-        // Reinsert buffered messages
-        for (const auto &msg : msgsForOriginal)
-        {
-            if (moveMessageToLeaf(*original, msg) != ErrorCode::Success)
-                insertToNVMSharedBuffer(Operations::Insert, extractKey(msg), extractValue(msg));
-        }
-        for (const auto &msg : msgsForSibling)
-        {
-            if (moveMessageToLeaf(*sibling, msg) != ErrorCode::Success)
-                insertToNVMSharedBuffer(Operations::Insert, extractKey(msg), extractValue(msg));
-        }
-
-        // Allocate and persist sibling
-        pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
         uint64_t newLeafID = 10000 + D_RW(pmemRoot)->nextLeafFileID++;
-        std::string siblingPath = allocateLeafOnDisk(getPlatformPath("leaf_storage"), newLeafID - 10000);
-        if (siblingPath.empty())
-            return ErrorCode::Error;
-
-        if (!saveLeafToDisk(leafPath, *original) || !saveLeafToDisk(siblingPath, *sibling))
-            return ErrorCode::Error;
-
-        // Reassign NVM buffered keys ≥ pivot
-        uint64_t from_id = leafID;
-        uint64_t to_id = newLeafID;
-        auto bufferedKeys = getBufferedKeysForNode(getNodeIDFromPersistentNode(parent));
-        for (const auto &k : bufferedKeys)
+        std::string newLeafPath = getLeafFilePathFromID(newLeafID);
+        if (!saveLeafToDisk(newLeafPath, *sibling) || !saveLeafToDisk(leafPath, *original))
         {
-            if (k >= pivot)
-            {
-                moveBufferedKeyBetweenNodes(from_id, to_id, k);
-                insertToMessageToNodeMap(k, to_id);
-            }
+            std::cerr << "[SPLIT] Failed to persist SSD leaves after split\n";
+            return ErrorCode::Error;
         }
 
-        // Update parent
         if (TOID_IS_NULL(parent))
-            return ErrorCode::Error;
+            return ErrorCode::Success;
 
         auto *parentPtr = D_RW(parent);
+        if (!parentPtr)
+            return ErrorCode::Error;
+
         if (parentPtr->keyCount >= MAX_KEYS_PER_NODE)
         {
-            std::cerr << "[SPLIT SSD] Parent full, pre-splitting parent...\n";
-            TOID(PersistentNode)
-            grandparent = findPersistentParent(persistentRoot, TOID_NULL(PersistentNode), parent);
-            ErrorCode res = splitPersistentNode(grandparent, parent);
-            if (res != ErrorCode::Success)
-                return res;
-
-            // Re-fetch new root and target parent
-            pmemRoot = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
-            persistentRoot = D_RW(pmemRoot)->persistentRoot;
-            parent = findTargetInternalNodeForKey(persistentRoot, key);
-            if (TOID_IS_NULL(parent))
-                return ErrorCode::Error;
-            parentPtr = D_RW(parent);
+            std::cerr << "[SPLIT] Parent full — requires upper-level split (not yet handled here)\n";
+            return ErrorCode::Error;
         }
 
-        int insertIdx = parentPtr->keyCount;
-        while (insertIdx > 0 && parentPtr->keys[insertIdx - 1] > pivot)
+        int insertIdx = -1;
+        for (int i = 0; i <= parentPtr->keyCount; ++i)
         {
-            parentPtr->keys[insertIdx] = parentPtr->keys[insertIdx - 1];
-            parentPtr->children[insertIdx + 1] = parentPtr->children[insertIdx];
-            insertIdx--;
+            if (parentPtr->children[i] == leafID)
+            {
+                insertIdx = i;
+                break;
+            }
+        }
+        if (insertIdx == -1)
+        {
+            std::cerr << "[SPLIT] Could not find leafID in parent children\n";
+            return ErrorCode::Error;
         }
 
-        parentPtr->keys[insertIdx] = pivot;
+        for (int i = parentPtr->keyCount; i > insertIdx; --i)
+        {
+            parentPtr->keys[i] = parentPtr->keys[i - 1];
+            parentPtr->children[i + 1] = parentPtr->children[i];
+        }
+
+        parentPtr->keys[insertIdx] = sibling->keys[0];
         parentPtr->children[insertIdx + 1] = newLeafID;
         parentPtr->keyCount++;
         pmemobj_persist(pmemPoolHandle, parentPtr, sizeof(PersistentNode));
-
-        if (parent.oid.off == persistentRoot.oid.off)
-        {
-            TOID(PMEMRoot)
-            root = POBJ_ROOT(pmemPoolHandle, PMEMRoot);
-            D_RW(root)->persistentRoot = parent;
-            persistentRoot = parent;
-            pmemobj_persist(pmemPoolHandle, D_RW(root), sizeof(PMEMRoot));
-        }
 
         return ErrorCode::Success;
     }

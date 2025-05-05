@@ -1,7 +1,4 @@
 #pragma once
-#ifndef NVM_LAYOUT_HPP
-#define NVM_LAYOUT_HPP
-
 #include <libpmemobj.h>
 #include <libpmemobj/pool_base.h>
 #include <libpmemobj/base.h>
@@ -32,11 +29,11 @@ POBJ_LAYOUT_TOID(bepsilon_layout, MessageToNodeEntry);
 POBJ_LAYOUT_TOID(bepsilon_layout, NodeFrequencyEntry);
 POBJ_LAYOUT_END(bepsilon_layout);
 
-#define MAX_NVM_MESSAGES 5
+#define MAX_NVM_MESSAGES 1000
 #define MAX_KEY_SIZE 64
 #define MAX_VAL_SIZE 64
-#define MAX_KEYS_PER_NODE 5
-#define NODE_BUFFER_SIZE (800) // 2MB buffer per node
+#define MAX_KEYS_PER_NODE 1000
+#define NODE_BUFFER_SIZE (2 * 1024 * 1024)
 #define MAX_NODES 100000
 #define MAX_MESSAGES 1000000
 
@@ -101,5 +98,3 @@ struct PersistentNode {
     char buffer[NODE_BUFFER_SIZE];
     size_t buffer_offset;
 };
-
-#endif
