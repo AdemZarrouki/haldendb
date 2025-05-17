@@ -29,17 +29,16 @@ POBJ_LAYOUT_TOID(bepsilon_layout, MessageToNodeEntry);
 POBJ_LAYOUT_TOID(bepsilon_layout, NodeFrequencyEntry);
 POBJ_LAYOUT_END(bepsilon_layout);
 
-#define MAX_NVM_MESSAGES 1000
+#define MAX_NVM_MESSAGES 100
 #define MAX_KEY_SIZE 64
 #define MAX_VAL_SIZE 64
-#define MAX_KEYS_PER_NODE 1000
-#define NODE_BUFFER_SIZE (2 * 1024 * 1024)
+#define MAX_KEYS_PER_NODE 10
+#define NODE_BUFFER_SIZE (800)
 #define MAX_NODES 100000
 #define MAX_MESSAGES 1000000
 
-
-
-struct message {
+struct message
+{
     uint8_t opCode;
     uint32_t key_size;
     uint32_t val_size;
@@ -47,48 +46,58 @@ struct message {
     char val_data[MAX_VAL_SIZE];
 };
 
-struct KeyList {
+struct KeyList
+{
     int count;
-    uint64_t keys[MAX_KEYS_PER_NODE];
+    uint64_t keys[100];
 };
 
-struct NodeMessageEntry {
+struct NodeMessageEntry
+{
     uint64_t node_id;
     KeyList key_list;
 };
 
-struct MessageToNodeEntry {
+struct MessageToNodeEntry
+{
     uint64_t key;
     uint64_t node_id;
 };
 
-struct NodeFrequencyEntry {
+struct NodeFrequencyEntry
+{
     uint64_t node_id;
     int frequency;
 };
 
-struct PMEMRoot {
-    TOID(PersistentNode) persistentRoot;
+struct PMEMRoot
+{
+    TOID(PersistentNode)
+    persistentRoot;
 
     // Shared buffer
-    TOID(message) messages[MAX_NVM_MESSAGES];
+    TOID(message)
+    messages[MAX_NVM_MESSAGES];
     int messageCount;
 
     // Maps for the AuxiliaryMaps
-    TOID(NodeMessageEntry) nodeMessageMap[MAX_NODES];
+    TOID(NodeMessageEntry)
+    nodeMessageMap[MAX_NODES];
     int nodeMessageMapCount;
 
-    TOID(MessageToNodeEntry) messageToNodeMap[MAX_MESSAGES];
+    TOID(MessageToNodeEntry)
+    messageToNodeMap[MAX_NODES];
     int messageToNodeMapCount;
 
-    TOID(NodeFrequencyEntry) nodeFrequencyMap[MAX_NODES];
+    TOID(NodeFrequencyEntry)
+    nodeFrequencyMap[MAX_NODES];
     int nodeFrequencyCount;
 
     int nextLeafFileID;
 };
 
-
-struct PersistentNode {
+struct PersistentNode
+{
     uint8_t isLeaf;
     size_t keyCount;
     uint64_t keys[MAX_KEYS_PER_NODE];
